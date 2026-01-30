@@ -1,4 +1,5 @@
 import io
+import textwrap
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -6,7 +7,7 @@ from datetime import datetime, timedelta
 
 # --------------- CONFIG / CONSTANTS --------------- #
 
-APP_TITLE = "IRAC - Inventory Risk & Availability Control (Frontend MVP)"
+APP_TITLE = "IRAC - Inventory Risk & Availability Control"
 # UI release metadata (displayed next to the title)
 RELEASE_VERSION = "v 0.35"
 RELEASE_DATE = "Released Jan 2026"
@@ -517,6 +518,8 @@ def render_risk_cards(df_view, df_forecast):
             </div>
         </div>
         """
+        # Remove indentation so Markdown does not treat HTML as a code block
+        html = textwrap.dedent(html).strip()
         st.markdown(html, unsafe_allow_html=True)
 
 
