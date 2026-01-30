@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # --------------- CONFIG / CONSTANTS --------------- #
 
 APP_TITLE = "IRAC - Inventory Risk & Availability Control"
-RELEASE_VERSION = "v 0.45"
+RELEASE_VERSION = "v 0.50"
 RELEASE_DATE = "Released Feb 2026"
 
 DEFAULT_COMPANIES = [
@@ -86,8 +86,7 @@ def classify_risk(df_inventory, avg_daily, config):
         np.inf,
     )
     
-    # Calculate an "Ideal Stock" (Simplified: 30 days of demand)
-    # In a real app, this would come from Lead Time + Safety Stock logic
+    # Ideal Stock (Simplified: 30 days)
     df["ideal_stock_qty"] = df["avg_daily_demand"] * 30 
     
     thr = config["risk_thresholds"]
@@ -103,25 +102,20 @@ def classify_risk(df_inventory, avg_daily, config):
 # --------------- DEMO DATA GENERATION --------------- #
 
 def generate_demo_data(company_id, config=None, seed=None):
-    """
-    Generates a full random dataset.
-    Randomizes the NUMBER of materials and locations every time.
-    """
     if config is None: config = DEFAULT_COMPANY_CONFIG
     
-    # Initialize RNG
+    # Fully Random RNG
     rng = np.random.default_rng(seed)
 
-    # 1. Randomize Dimensions (Material/Location Count)
-    # This ensures the number of combinations changes every click
-    n_materials = rng.integers(40, 120)  # Between 40 and 120 materials
-    n_locations = rng.integers(3, 8)     # Between 3 and 8 locations
+    # Random Dimensions
+    n_materials = rng.integers(40, 120)
+    n_locations = rng.integers(3, 8)
 
     # Materials
     materials = []
     for i in range(n_materials):
         mid = f"MAT_{i:03d}"
-        abc = rng.choice(["A", "B", "C"], p=[0.15, 0.55, 0.3]) # Fewer A items
+        abc = rng.choice(["A", "B", "C"], p=[0.15, 0.55, 0.3])
         materials.append({
             "company_id": company_id,
             "material_id": mid,
@@ -153,17 +147,15 @@ def generate_demo_data(company_id, config=None, seed=None):
 
     demand_rows, forecast_rows = [], []
     
-    # Generate Demand & Forecast
+    # Demand & Forecast
     for _, m in df_materials.iterrows():
         for _, l in df_locations.iterrows():
             base = rng.uniform(10, 800)
             
-            # Demand
             d_series = gen_seasonal_demand_series(len(hist_dates), base, 0.3, 0.2, rng.integers(1, 1e9))
             for d, q in zip(hist_dates, d_series):
                 demand_rows.append({"company_id": company_id, "material_id": m["material_id"], "location_id": l["location_id"], "date": d.date(), "qty_demand": q})
             
-            # Forecast
             f_series = gen_seasonal_demand_series(len(fcst_dates), base * rng.uniform(0.9, 1.2), 0.3, 0.1, rng.integers(1, 1e9))
             for d, q in zip(fcst_dates, f_series):
                 forecast_rows.append({"company_id": company_id, "material_id": m["material_id"], "location_id": l["location_id"], "date": d.date(), "qty_forecast": q})
@@ -171,7 +163,7 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
-    # Inventory Snapshot - REVISED RISK BIAS
+    # Inventory Snapshot
     inv_rows = []
     snapshot_date = today
     avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
@@ -180,23 +172,18 @@ def generate_demo_data(company_id, config=None, seed=None):
         mid, lid = row["material_id"], row["location_id"]
         amd = row["qty_demand"]
         
-        # Risk Logic:
-        # 15% Critical (Red) -> 0 to 2 days
-        # 20% Warning (Yellow) -> 2.1 to 10 days
-        # 65% Healthy/Excess (Green) -> 10 to 60 days... PLUS OUTLIERS
-        
+        # Risk Logic: 15% Red, 20% Yellow, 65% Green (with some outliers)
         risk_roll = rng.random()
         
         if risk_roll < 0.15: # RED
             cov_days = rng.uniform(0, 2)
-        elif risk_roll < 0.35: # YELLOW (15+20 = 35)
+        elif risk_roll < 0.35: # YELLOW
             cov_days = rng.uniform(2.1, 10)
         else: # GREEN & OUTLIERS
-            # 10% chance of being an "Excess Outlier" (Dead Stock)
             if rng.random() < 0.10:
-                cov_days = rng.uniform(120, 365) # Huge outlier
+                cov_days = rng.uniform(120, 365) # Excess
             else:
-                cov_days = rng.uniform(10.1, 60) # Normal healthy
+                cov_days = rng.uniform(10.1, 60) # Healthy
             
         qty_on_hand = int(amd/30.0 * cov_days)
         inv_rows.append({
@@ -213,7 +200,6 @@ def generate_demo_data(company_id, config=None, seed=None):
     po_rows = []
     po_cnt = 1
     for _, inv in df_inventory.iterrows():
-        # Higher chance of PO if stock is low
         has_po = False
         if inv["qty_on_hand"] < 50: has_po = rng.random() < 0.8
         else: has_po = rng.random() < 0.3
@@ -386,54 +372,51 @@ def main():
 
     st.markdown("---")
 
-    # --- SIDEBAR: Data Dictionary (Smaller Font) ---
+    # --- SIDEBAR: Data Dictionary (Pure Markdown Fix) ---
     with st.sidebar.expander("📚 Data Dictionary / Template Schema", expanded=False):
-        # Using HTML div with inline style to reduce font size by approx 2 points (16px -> 13px)
+        # Using pure Markdown to avoid HTML rendering issues
         st.markdown("""
-        <div style="font-size: 13px; line-height: 1.4;">
-            <strong style="color:#0B67A4">1. demand_history.csv</strong><br>
-            • material_id (str)<br>
-            • location_id (str)<br>
-            • date (YYYY-MM-DD)<br>
-            • qty_demand (float)<br><br>
+        **1. demand_history.csv**
+        * `material_id` (str)
+        * `location_id` (str)
+        * `date` (YYYY-MM-DD)
+        * `qty_demand` (float)
 
-            <strong style="color:#0B67A4">2. forecast.csv</strong><br>
-            • material_id (str)<br>
-            • location_id (str)<br>
-            • date (YYYY-MM-DD)<br>
-            • qty_forecast (float)<br><br>
+        **2. forecast.csv**
+        * `material_id` (str)
+        * `location_id` (str)
+        * `date` (YYYY-MM-DD)
+        * `qty_forecast` (float)
 
-            <strong style="color:#0B67A4">3. inventory_snapshot.csv</strong><br>
-            • material_id (str)<br>
-            • location_id (str)<br>
-            • snapshot_date (YYYY-MM-DD)<br>
-            • qty_on_hand (float)<br><br>
+        **3. inventory_snapshot.csv**
+        * `material_id` (str)
+        * `location_id` (str)
+        * `snapshot_date` (YYYY-MM-DD)
+        * `qty_on_hand` (float)
 
-            <strong style="color:#0B67A4">4. open_supply.csv</strong><br>
-            • order_id (str)<br>
-            • material_id, location_id<br>
-            • qty_inbound (float)<br>
-            • due_date (YYYY-MM-DD)<br><br>
-            
-            <em>Optionally: materials.csv, locations.csv</em>
-        </div>
-        """, unsafe_allow_html=True)
+        **4. open_supply.csv**
+        * `order_id` (str)
+        * `material_id`, `location_id`
+        * `qty_inbound` (float)
+        * `due_date` (YYYY-MM-DD)
+        
+        *Optional: materials.csv, locations.csv*
+        """)
 
-    # --- SIDEBAR: Logic Explainer (New) ---
+    # --- SIDEBAR: Logic Explainer ---
     with st.sidebar.expander("ℹ️ How Calculations Work", expanded=False):
         st.markdown("""
-        <div style="font-size: 13px;">
-            <b>Avg Daily Demand:</b> Total historical consumption in the window divided by days in window.<br><br>
-            <b>Coverage (Days):</b><br> 
-            <code>Qty On Hand / Avg Daily Demand</code><br><br>
-            <b>Risk Status:</b><br>
-            🔴 <b>RED:</b> Coverage ≤ Critical Threshold<br>
-            🟡 <b>YELLOW:</b> Coverage ≤ Attention Threshold<br>
-            🟢 <b>GREEN:</b> Coverage > Attention Threshold<br><br>
-            <b>Projected Stock:</b><br>
-            <code>Current Stock + Inbound Supply - Forecast</code>
-        </div>
-        """, unsafe_allow_html=True)
+        **Avg Daily Demand:** Total history / days in window.
+        
+        **Coverage (Days):** `Qty On Hand / Avg Daily Demand`
+        
+        **Risk Status:**
+        * 🔴 **RED:** Coverage ≤ Critical (e.g. 2 days)
+        * 🟡 **YELLOW:** Coverage ≤ Attention (e.g. 10 days)
+        * 🟢 **GREEN:** Healthy Coverage
+        
+        **Projected Stock:** `Current + Inbound - Forecast`
+        """)
 
     # --- SIDEBAR CONFIGURATION ---
     st.sidebar.header("Configuration")
@@ -504,26 +487,36 @@ def main():
     
     if not data["materials"].empty:
         df_risk = df_risk.merge(data["materials"][["material_id", "material_desc", "abc_class", "unit_price"]], on="material_id", how="left")
-        # Calculate Value
         df_risk["total_value"] = df_risk["qty_on_hand"] * df_risk.get("unit_price", 10.0)
-        df_risk["ideal_value"] = df_risk["ideal_stock_qty"] * df_risk.get("unit_price", 10.0)
         
     if not data["locations"].empty:
         df_risk = df_risk.merge(data["locations"][["location_id", "location_name", "region"]], on="location_id", how="left")
 
-    # METRICS
-    st.markdown("### 📊 High-Level KPIs")
-    m1, m2, m3, m4 = st.columns(4)
+    # --- METRICS SECTION (Improved) ---
+    st.markdown("### 📊 Portfolio Health")
+    
+    # Calculate Counts
     n_tot = len(df_risk)
     n_red = len(df_risk[df_risk["risk_status"]=="RED"])
     n_yel = len(df_risk[df_risk["risk_status"]=="YELLOW"])
+    n_grn = len(df_risk[df_risk["risk_status"]=="GREEN"])
+    
+    # Calculate Percentages
+    pct_red = (n_red / n_tot * 100) if n_tot > 0 else 0
+    pct_yel = (n_yel / n_tot * 100) if n_tot > 0 else 0
+    pct_grn = (n_grn / n_tot * 100) if n_tot > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
     
     m1.metric("Total SKU-Locations", n_tot)
-    m2.metric("Critical Shortages (RED)", n_red, delta=f"{n_red/n_tot:.1%}" if n_tot else "0%", delta_color="inverse")
-    m3.metric("Low Coverage (YELLOW)", n_yel, delta=f"{n_yel/n_tot:.1%}" if n_tot else "0%", delta_color="inverse")
-    m4.metric("Avg Coverage", f"{df_risk['coverage_days'].replace([np.inf, -np.inf], np.nan).median():.1f} days")
+    
+    # Displaying % in 'delta' but removing the arrow color logic by using delta_color='off' 
+    # or just normal strings to avoid confusion.
+    m2.metric("Critical (RED)", n_red, delta=f"{pct_red:.1f}% of Total", delta_color="inverse")
+    m3.metric("Warning (YELLOW)", n_yel, delta=f"{pct_yel:.1f}% of Total", delta_color="inverse")
+    m4.metric("Healthy (GREEN)", n_grn, delta=f"{pct_grn:.1f}% of Total", delta_color="normal")
 
-    # SECTION 2: RISK
+    # SECTION 2: RISK ANALYSIS
     st.markdown("---")
     st.header("2. Risk Analysis")
     
@@ -546,42 +539,28 @@ def main():
         render_risk_cards(df_view)
 
     with c_risk_chart:
-        st.subheader("Inventory Health Insights")
+        st.subheader("Inventory Insights")
         
-        # 1. Scatter: Risk Matrix
-        df_chart = df_view.copy()
-        df_chart["vis_coverage"] = df_chart["coverage_days"].clip(upper=60)
-        
-        if not df_chart.empty:
-            scatter = alt.Chart(df_chart).mark_circle(size=80).encode(
-                x=alt.X('avg_daily_demand', title='Avg Daily Demand'),
-                y=alt.Y('vis_coverage', title='Coverage (Days) [Capped 60]'),
-                color=alt.Color('risk_status', scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
-                tooltip=['material_id', 'coverage_days']
-            ).interactive().properties(height=250, title="Risk Matrix")
-            st.altair_chart(scatter, use_container_width=True)
-            
-            # 2. Bar Chart: Current Value vs Ideal Value by ABC
-            # Need to aggregate first
-            if "total_value" in df_chart.columns:
-                agg_val = df_chart.groupby("abc_class")[["total_value", "ideal_value"]].sum().reset_index()
-                agg_val = agg_val.melt("abc_class", var_name="Type", value_name="Value")
-                
-                bar = alt.Chart(agg_val).mark_bar().encode(
-                    x=alt.X('abc_class', title='ABC Class'),
-                    y=alt.Y('Value', title='Inventory Value ($)'),
-                    color=alt.Color('Type', scale=alt.Scale(domain=['total_value', 'ideal_value'], range=['#0B67A4', '#90C2E7'])),
-                    tooltip=['abc_class', 'Type', 'Value']
-                ).properties(height=250, title="Investment: Current vs Ideal")
-                st.altair_chart(bar, use_container_width=True)
-                
-            # 3. Boxplot: Coverage Distribution (showing outliers)
-            box = alt.Chart(df_chart).mark_boxplot(extent=1.5).encode(
-                x=alt.X('abc_class', title='ABC Class'),
-                y=alt.Y('coverage_days', title='Coverage Days (Log Scale)', scale=alt.Scale(type='symlog')),
-                color='abc_class'
-            ).properties(height=250, title="Coverage Spread & Outliers")
-            st.altair_chart(box, use_container_width=True)
+        if not df_view.empty:
+            # 1. NEW CHART: Inventory Value at Risk (Stacked Bar)
+            if "total_value" in df_view.columns:
+                chart_val = alt.Chart(df_view).mark_bar().encode(
+                    x=alt.X('region', title='Region'),
+                    y=alt.Y('sum(total_value)', title='Inventory Value ($)'),
+                    color=alt.Color('risk_status', scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                    tooltip=['region', 'risk_status', 'sum(total_value)']
+                ).properties(height=220, title="Inventory Value at Risk by Region")
+                st.altair_chart(chart_val, use_container_width=True)
+
+            # 2. NEW CHART: Coverage Distribution (Histogram)
+            # Create bins for coverage to show distribution shape
+            chart_hist = alt.Chart(df_view).mark_bar().encode(
+                x=alt.X('coverage_days', bin=alt.Bin(maxbins=20), title='Coverage Days (Binned)'),
+                y=alt.Y('count()', title='Number of Items'),
+                color=alt.Color('risk_status', legend=None, scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                tooltip=['count()']
+            ).properties(height=220, title="Coverage Distribution (Stock Shape)")
+            st.altair_chart(chart_hist, use_container_width=True)
 
         else:
             st.info("No data for chart.")
