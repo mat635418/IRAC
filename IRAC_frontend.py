@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # --------------- CONFIG / CONSTANTS --------------- #
 
 APP_TITLE = "IRAC - Inventory Risk & Availability Control"
-RELEASE_VERSION = "v 0.61"
+RELEASE_VERSION = "v 0.62"
 RELEASE_DATE = "Released Feb 2026"
 
 DEFAULT_COMPANIES = [
@@ -80,55 +80,42 @@ def compute_demand_stats(df_demand: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 def get_z_score(service_level):
-    """
-    Returns Z-score for common service levels to avoid scipy dependency.
-    """
-    # Standard Normal Distribution Table (approx)
-    lookup = {
-        0.50: 0.00,
-        0.80: 0.84,
-        0.90: 1.28,
-        0.95: 1.645,
-        0.98: 2.055,
-        0.99: 2.33,
-        0.999: 3.09
-    }
-    # Return closest or default to 1.645 (95%)
+    """Returns Z-score for common service levels."""
+    lookup = {0.50: 0.00, 0.80: 0.84, 0.90: 1.28, 0.95: 1.645, 0.98: 2.055, 0.99: 2.33, 0.999: 3.09}
     return lookup.get(service_level, 1.645)
 
 def calculate_inventory_parameters(df_risk, config):
     """
-    Method 5 Logic:
-    SS = Z * Sigma * sqrt(L)
-    ROP = (Avg * L) + SS
-    Max = ROP + CycleStock (Avg * OrderCycle)
+    Method 5 Logic + Conversion to Days for Projection
     """
-    # Service Level Z-Score
     sl = config["service_levels"]["default"]
     z_score = get_z_score(sl)
     
-    # We assume 'lead_time_days' is in the dataframe (generated or uploaded)
-    # If not, default to 10
     if "lead_time_days" not in df_risk.columns:
         df_risk["lead_time_days"] = 10
         
-    # Order Cycle (Frequency of replenishment). Default to 30 days if not present
     order_cycle_days = 30 
     
-    # 1. Safety Stock (Method 5)
+    # 1. Safety Stock Qty (Method 5)
     # SS = Z * std_dev_daily * sqrt(lead_time)
     df_risk["ss_qty"] = z_score * df_risk["std_dev_daily"] * np.sqrt(df_risk["lead_time_days"])
+    
+    # 2. Convert SS to "Days Coverage" (for dynamic projection)
+    # If demand evolves, we assume the "Days of Safety" remains the stable policy
+    # SS_days = SS_qty / Avg_Daily_History
+    df_risk["ss_days"] = np.where(df_risk["avg_daily_demand"] > 0, df_risk["ss_qty"] / df_risk["avg_daily_demand"], 0)
+    
+    # 3. ROP and Max in Days
+    # ROP_days = LeadTime + SS_days
+    df_risk["rop_days"] = df_risk["lead_time_days"] + df_risk["ss_days"]
+    
+    # Max_days = ROP_days + OrderCycle
+    df_risk["max_days"] = df_risk["rop_days"] + order_cycle_days
+
+    # Calculate static quantities for current view
     df_risk["ss_qty"] = df_risk["ss_qty"].round().astype(int)
-    
-    # 2. Reorder Point (ROP)
-    # ROP = LeadTimeDemand + SS
-    df_risk["rop_qty"] = (df_risk["avg_daily_demand"] * df_risk["lead_time_days"]) + df_risk["ss_qty"]
-    df_risk["rop_qty"] = df_risk["rop_qty"].round().astype(int)
-    
-    # 3. Max Stock
-    # Max = ROP + (AvgDaily * OrderCycle)
-    df_risk["max_qty"] = df_risk["rop_qty"] + (df_risk["avg_daily_demand"] * order_cycle_days)
-    df_risk["max_qty"] = df_risk["max_qty"].round().astype(int)
+    df_risk["rop_qty"] = (df_risk["avg_daily_demand"] * df_risk["rop_days"]).round().astype(int)
+    df_risk["max_qty"] = (df_risk["avg_daily_demand"] * df_risk["max_days"]).round().astype(int)
     
     return df_risk
 
@@ -171,16 +158,13 @@ def generate_demo_data(company_id, config=None, seed=None):
     if config is None: config = DEFAULT_COMPANY_CONFIG
     rng = np.random.default_rng(seed)
 
-    # Random Dimensions
     n_materials = rng.integers(50, 150)
     n_locations = rng.integers(3, 8)
 
-    # Materials
     materials = []
     for i in range(n_materials):
         mid = f"MAT_{i:03d}"
         abc = rng.choice(["A", "B", "C"], p=[0.15, 0.55, 0.3])
-        # Random Lead Time for Method 5
         lt = rng.integers(5, 45)
         materials.append({
             "company_id": company_id,
@@ -193,7 +177,6 @@ def generate_demo_data(company_id, config=None, seed=None):
             "lead_time_days": lt
         })
 
-    # Locations
     locations = []
     for j in range(n_locations):
         lid = f"LOC_{j:02d}"
@@ -214,12 +197,10 @@ def generate_demo_data(company_id, config=None, seed=None):
 
     demand_rows, forecast_rows = [], []
     
-    # Demand & Forecast
     for _, m in df_materials.iterrows():
         for _, l in df_locations.iterrows():
             base = rng.uniform(10, 800)
             
-            # Use high noise to make StDev relevant for Method 5
             d_series = gen_seasonal_demand_series(len(hist_dates), base, 0.3, 0.25, rng.integers(1, 1e9))
             for d, q in zip(hist_dates, d_series):
                 demand_rows.append({"company_id": company_id, "material_id": m["material_id"], "location_id": l["location_id"], "date": d.date(), "qty_demand": q})
@@ -231,7 +212,6 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
-    # Inventory Snapshot
     inv_rows = []
     snapshot_date = today
     avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
@@ -240,7 +220,6 @@ def generate_demo_data(company_id, config=None, seed=None):
         mid, lid = row["material_id"], row["location_id"]
         amd = row["qty_demand"]
         
-        # Risk Logic
         risk_roll = rng.random()
         if risk_roll < 0.15: cov_days = rng.uniform(0, 2)
         elif risk_roll < 0.35: cov_days = rng.uniform(2.1, 10)
@@ -259,7 +238,6 @@ def generate_demo_data(company_id, config=None, seed=None):
 
     df_inventory = pd.DataFrame(inv_rows)
     
-    # Supply Orders
     po_rows = []
     po_cnt = 1
     for _, inv in df_inventory.iterrows():
@@ -315,7 +293,6 @@ def _get_card_css():
         .lbl { font-size:11px; color:#7D98A3; font-weight:700; margin-bottom:4px; }
         .val { font-weight:700; color:#213644; font-size:15px; }
         
-        /* Metric Box CSS */
         .metric-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -550,7 +527,6 @@ def main():
     # CALCULATE METRICS
     df_stats = compute_demand_stats(df_dem)
     
-    # Merge Material Lead Time if available
     if not data["materials"].empty:
         df_stats = df_stats.merge(data["materials"][["material_id", "lead_time_days"]], on="material_id", how="left")
     
@@ -563,7 +539,7 @@ def main():
     if not data["locations"].empty:
         df_risk = df_risk.merge(data["locations"][["location_id", "location_name", "region"]], on="location_id", how="left")
 
-    # --- METRICS SECTION (50/50 Split) ---
+    # --- METRICS SECTION ---
     
     n_tot = len(df_risk)
     if n_tot > 0:
@@ -612,14 +588,12 @@ def main():
             
             base = alt.Chart(source).encode(theta=alt.Theta("count", stack=True))
             
-            # Thick Donut
             pie = base.mark_arc(outerRadius=120, innerRadius=70).encode(
                 color=alt.Color("risk_status", legend=None, scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
                 order=alt.Order("risk_status", sort="descending"),
                 tooltip=["risk_status", "count"]
             )
             
-            # Text Style Match
             text = base.mark_text(radius=145, size=24, fontWeight='bold').encode(
                 text=alt.Text("count"),
                 order=alt.Order("risk_status", sort="descending"),
@@ -655,13 +629,18 @@ def main():
     with c_risk_chart:
         st.subheader("Inventory Insights")
         if not df_view.empty:
-            chart_hist = alt.Chart(df_view).mark_bar().encode(
-                x=alt.X('coverage_days', bin=alt.Bin(maxbins=20), title='Coverage Days (Binned)'),
-                y=alt.Y('count()', title='Number of Items'),
-                color=alt.Color('risk_status', legend=None, scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
-                tooltip=['count()']
-            ).properties(height=220, title="Coverage Distribution (Stock Shape)")
-            st.altair_chart(chart_hist, use_container_width=True)
+            # Re-added Scatter Plot (Risk Matrix)
+            df_chart = df_view.copy()
+            df_chart["vis_coverage"] = df_chart["coverage_days"].clip(upper=60)
+            
+            scatter = alt.Chart(df_chart).mark_circle(size=80).encode(
+                x=alt.X('avg_daily_demand', title='Avg Daily Demand'),
+                y=alt.Y('vis_coverage', title='Coverage (Days) [Capped 60]'),
+                color=alt.Color('risk_status', scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                tooltip=['material_id', 'coverage_days']
+            ).interactive().properties(height=350, title="Risk Matrix (Demand vs Coverage)")
+            
+            st.altair_chart(scatter, use_container_width=True)
         else:
             st.info("No data for chart.")
 
@@ -695,11 +674,11 @@ def main():
     tab1, tab2 = st.tabs(["📉 Demand & Supply Projection", "📋 Transaction Details"])
 
     with tab1:
-        # Fetch Calculated Params for this item
+        # Fetch Parameters in "Days" to apply dynamically
         item_params = df_risk[(df_risk["material_id"]==s_mat) & (df_risk["location_id"]==s_loc)].iloc[0]
-        ss_val = item_params["ss_qty"]
-        rop_val = item_params["rop_qty"]
-        max_val = item_params["max_qty"]
+        ss_days = item_params["ss_days"]
+        rop_days = item_params["rop_days"]
+        max_days = item_params["max_days"]
         
         base = alt.Chart(dd_hist).mark_line(color='gray').encode(x='date', y='qty_demand', tooltip=['date', 'qty_demand'])
         if not dd_fcst.empty:
@@ -709,15 +688,40 @@ def main():
         else:
             st.altair_chart(base.interactive(), use_container_width=True)
         
-        st.subheader("Projected Inventory Balance (90 Days) with Stock Limits")
+        st.subheader("Projected Inventory Corridor (Dynamic Policy)")
         if not dd_inv.empty:
             start_stock = dd_inv.iloc[0]["qty_on_hand"]
-            avg_daily_fcst = dd_fcst["qty_forecast"].mean() / 30.0 if not dd_fcst.empty else 0
             
+            # Create Daily Projection DataFrame (90 Days)
             today = pd.Timestamp.today().normalize()
             dates = pd.date_range(today, periods=90, freq='D')
             proj_df = pd.DataFrame({"date": dates})
-            proj_df["outflow"] = avg_daily_fcst
+            
+            # Merge Forecast (interpolated or forward filled if strictly monthly)
+            # For robustness, we assume monthly forecast and interpolate to daily for smoother lines
+            # If dd_fcst is monthly, we resample. For demo simple logic:
+            if not dd_fcst.empty:
+                # Approximate daily demand from forecast stream
+                # In real app: rigorous resampling. Here: merge nearest
+                dd_fcst_daily = dd_fcst.set_index("date").resample("D").interpolate(method="linear")
+                # Reset index
+                dd_fcst_daily = dd_fcst_daily.reset_index()
+                # Merge into proj
+                proj_df = proj_df.merge(dd_fcst_daily[["date", "qty_forecast"]], on="date", how="left").fillna(method="bfill").fillna(0)
+            else:
+                proj_df["qty_forecast"] = 0
+            
+            # Normalize forecast qty (monthly -> daily approx if forecast was monthly sum)
+            # Assuming demo generator makes monthly sums.
+            proj_df["daily_demand"] = proj_df["qty_forecast"] / 30.0 
+            
+            # Calculate Dynamic Corridor
+            proj_df["dynamic_ss"] = proj_df["daily_demand"] * ss_days
+            proj_df["dynamic_rop"] = proj_df["daily_demand"] * rop_days
+            proj_df["dynamic_max"] = proj_df["daily_demand"] * max_days
+
+            # Calculate Stock Projection
+            proj_df["outflow"] = proj_df["daily_demand"]
             proj_df["inflow"] = 0
             
             if not dd_supp.empty:
@@ -729,20 +733,18 @@ def main():
             proj_df["net_change"] = proj_df["inflow"] - proj_df["outflow"]
             proj_df["projected_stock"] = start_stock + proj_df["net_change"].cumsum()
             
+            # Plot
             base = alt.Chart(proj_df).encode(x='date')
-            line = base.mark_line(color='#0B67A4').encode(y=alt.Y('projected_stock', title='Projected Stock'))
             
-            # Method 5 Lines
-            rule_ss = base.mark_rule(color='red', strokeDash=[4,4]).encode(y=alt.datum(ss_val))
-            rule_rop = base.mark_rule(color='orange', strokeDash=[4,4]).encode(y=alt.datum(rop_val))
-            rule_max = base.mark_rule(color='green', strokeDash=[4,4]).encode(y=alt.datum(max_val))
+            # Lines
+            line_stock = base.mark_line(color='#0B67A4', strokeWidth=3).encode(y=alt.Y('projected_stock', title='Stock Level'))
+            line_ss = base.mark_line(color='red', strokeDash=[4,4]).encode(y='dynamic_ss')
+            line_rop = base.mark_line(color='orange', strokeDash=[4,4]).encode(y='dynamic_rop')
+            line_max = base.mark_line(color='green', strokeDash=[4,4]).encode(y='dynamic_max')
             
-            # Labels for lines
-            text_ss = base.mark_text(align='left', dx=5, color='red').encode(x='min(date)', y=alt.datum(ss_val), text=alt.value(f"SS: {ss_val}"))
-            text_rop = base.mark_text(align='left', dx=5, color='orange').encode(x='min(date)', y=alt.datum(rop_val), text=alt.value(f"ROP: {rop_val}"))
-            text_max = base.mark_text(align='left', dx=5, color='green').encode(x='min(date)', y=alt.datum(max_val), text=alt.value(f"MAX: {max_val}"))
-
-            st.altair_chart((line + rule_ss + rule_rop + rule_max + text_ss + text_rop + text_max).interactive(), use_container_width=True)
+            # Labels (using max date to put label at end)
+            st.altair_chart((line_stock + line_ss + line_rop + line_max).interactive(), use_container_width=True)
+            st.caption("Red: Safety Stock | Orange: ROP | Green: Max Stock (Dynamic based on forecasted demand)")
 
     with tab2:
         c_inv, c_supp = st.columns(2)
