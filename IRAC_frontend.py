@@ -4,110 +4,67 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import altair as alt
 from datetime import datetime, timedelta
 
 # --------------- CONFIG / CONSTANTS --------------- #
 
 APP_TITLE = "IRAC - Inventory Risk & Availability Control"
-# UI release metadata (displayed next to the title)
-RELEASE_VERSION = "v 0.36"
-RELEASE_DATE = "Released Jan 2026"
+RELEASE_VERSION = "v 0.40"
+RELEASE_DATE = "Released Feb 2026"
 
 DEFAULT_COMPANIES = [
-    {"company_id": "COMPANY_A", "name": "Company A"},
-    {"company_id": "COMPANY_B", "name": "Company B"},
+    {"company_id": "COMPANY_A", "name": "Global Tech Industries"},
+    {"company_id": "COMPANY_B", "name": "Prime Logistics Corp"},
 ]
 
-# Default config used for generated demo data and as a fallback
 DEFAULT_COMPANY_CONFIG = {
-    "time_bucket": "month",            # "week" or "month"
+    "time_bucket": "month",
     "history_months": 24,
     "forecast_months": 18,
     "planning_horizon_months": 6,
-    "service_levels": {
-        "A": 0.98,
-        "B": 0.95,
-        "C": 0.90,
-        "default": 0.95,
-    },
-    # Risk thresholds defined in coverage days
+    "service_levels": {"default": 0.95},
     "risk_thresholds": {
-        "shortage_days": 0,   # stockout or negative coverage
-        "attention_days": 7,  # coverage < 7 days -> YELLOW
-        "excess_days": 90,    # coverage > 90 days -> BLUE (not used in GREEN/YELLOW/RED mapping)
+        "shortage_days": 2,    # Very critical
+        "attention_days": 10,  # Warning zone
+        "excess_days": 90,
     },
     "aggregation": {
         "default_level": "location",
-        "allow_rollup_to_region": True,
     },
 }
 
 # --------------- UTILS --------------- #
 
-
 def month_range(end_date: datetime, months_back: int) -> pd.DatetimeIndex:
-    """Generate month-end dates going backwards."""
-    # Use MonthEnd periods backward from end_date
     end = pd.Timestamp(end_date).normalize() + pd.offsets.MonthEnd(0)
-    dates = pd.date_range(end - pd.DateOffset(months=months_back - 1),
-                          end,
-                          freq="M")
+    dates = pd.date_range(end - pd.DateOffset(months=months_back - 1), end, freq="M")
     return dates
 
-
-def gen_seasonal_demand_series(
-    periods: int,
-    base_level: float,
-    seasonal_amplitude: float = 0.3,
-    noise_std: float = 0.15,
-    random_state=None,
-) -> np.ndarray:
-    """
-    Create a demand time series with seasonality and noise.
-    periods: number of time points (months or weeks)
-    base_level: average demand level
-    seasonal_amplitude: relative amplitude of seasonality (0-1)
-    noise_std: relative noise level
-    """
+def gen_seasonal_demand_series(periods, base_level, seasonal_amplitude=0.3, noise_std=0.15, random_state=None):
     rng = np.random.default_rng(random_state)
     t = np.arange(periods)
-
-    # Simple yearly seasonality (assuming monthly or weekly):
-    # 2 * pi * t / 12 for monthly seasonality
-    # If using weekly, it's still fine (just approximate annual cycle).
     seasonal = 1.0 + seasonal_amplitude * np.sin(2 * np.pi * t / 12.0)
-
     noise = rng.normal(loc=0.0, scale=noise_std, size=periods)
     series = base_level * seasonal * (1.0 + noise)
     series = np.clip(series, a_min=0, a_max=None)
     return series.round().astype(int)
 
-
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """Convert a DataFrame to a CSV in bytes (for in-memory upload simulation)."""
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
-
 
 def parse_uploaded_csv(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
         return None
     return pd.read_csv(uploaded_file)
 
-
 def compute_avg_daily_demand(df_demand: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute average daily demand per material/location
-    from demand history (which is at arbitrary date frequency).
-    Assumes df has columns: material_id, location_id, date, qty_demand.
-    """
     if df_demand is None or df_demand.empty:
         return pd.DataFrame()
-
     df = df_demand.copy()
     df["date"] = pd.to_datetime(df["date"])
-
     agg = (
         df.groupby(["material_id", "location_id"])
         .agg(
@@ -119,830 +76,467 @@ def compute_avg_daily_demand(df_demand: pd.DataFrame) -> pd.DataFrame:
     agg["avg_daily_demand"] = agg["total_demand"] / agg["days_span"].replace(0, 1)
     return agg
 
-
-def classify_risk(
-    df_inventory: pd.DataFrame,
-    avg_daily: pd.DataFrame,
-    config: dict,
-) -> pd.DataFrame:
-    """
-    Merge inventory snapshot with avg daily demand and classify risk based on coverage.
-    df_inventory: snapshot with columns [material_id, location_id, snapshot_date, qty_on_hand]
-    avg_daily: per item-location avg_daily_demand
-    config: company config with risk thresholds
-
-    NOTE: This version returns simplified risk_status values: 'GREEN', 'YELLOW', 'RED'
-    based on the configured thresholds. (User requested only GREEN / YELLOW / RED.)
-    """
+def classify_risk(df_inventory, avg_daily, config):
     if df_inventory is None or df_inventory.empty:
         return pd.DataFrame()
-
     df = df_inventory.copy()
     df = df.merge(
         avg_daily[["material_id", "location_id", "avg_daily_demand"]],
         on=["material_id", "location_id"],
         how="left",
     )
-
     df["avg_daily_demand"].fillna(0.0, inplace=True)
-
-    # Coverage in days
-    # If avg_daily_demand == 0, treat coverage as very large (inf)
     df["coverage_days"] = np.where(
         df["avg_daily_demand"] > 0,
         df["qty_on_hand"] / df["avg_daily_demand"],
         np.inf,
     )
-
     thr = config["risk_thresholds"]
-
     def risk_label(row):
         cov = row["coverage_days"]
-        if cov <= thr["shortage_days"]:
-            return "RED"
-        elif cov <= thr["attention_days"]:
-            return "YELLOW"
-        else:
-            # treat all other cases as GREEN (including very high coverage)
-            return "GREEN"
-
+        if cov <= thr["shortage_days"]: return "RED"
+        elif cov <= thr["attention_days"]: return "YELLOW"
+        else: return "GREEN"
     df["risk_status"] = df.apply(risk_label, axis=1)
     return df
 
-
 # --------------- DEMO DATA GENERATION --------------- #
 
-
-def generate_demo_data(
-    company_id: str,
-    config: dict = None,
-    n_materials: int = 20,
-    n_locations: int = 5,
-    seed: int = 42,
-):
+def generate_demo_data(company_id, config=None, n_materials=80, n_locations=8, seed=42):
     """
-    Generate realistic fake data for:
-    - material master
-    - location master
-    - demand history (24 months)
-    - forecast (18 months)
-    - inventory snapshot
-    - lead time history
-    - open supply orders
+    Scaled up generation with biased risk distribution.
     """
-
-    if config is None:
-        config = DEFAULT_COMPANY_CONFIG
-
+    if config is None: config = DEFAULT_COMPANY_CONFIG
     rng = np.random.default_rng(seed)
 
-    # Dimensions
+    # Materials
     materials = []
     for i in range(n_materials):
         mid = f"MAT_{i:03d}"
-        abc = rng.choice(["A", "B", "C"], p=[0.3, 0.4, 0.3])
-        materials.append(
-            {
-                "company_id": company_id,
-                "material_id": mid,
-                "material_desc": f"Material {i:03d}",
-                "uom": "EA",
-                "material_group": f"GROUP_{i % 4}",
-                "abc_class": abc,
-                "criticality": "Strategic" if abc == "A" else "Standard",
-            }
-        )
+        abc = rng.choice(["A", "B", "C"], p=[0.2, 0.5, 0.3])
+        materials.append({
+            "company_id": company_id,
+            "material_id": mid,
+            "material_desc": f"Component {mid} - {rng.choice(['Standard', 'Premium', 'Basic'])}",
+            "uom": "EA",
+            "material_group": f"GRP_{i % 5}",
+            "abc_class": abc,
+            "unit_price": round(rng.uniform(10, 500), 2)
+        })
 
+    # Locations
     locations = []
     for j in range(n_locations):
         lid = f"LOC_{j:02d}"
-        ltype = rng.choice(["PLANT", "DC"])
-        locations.append(
-            {
-                "company_id": company_id,
-                "location_id": lid,
-                "location_name": f"Location {lid}",
-                "location_type": ltype,
-                "region": f"REGION_{j % 2}",
-            }
-        )
+        locations.append({
+            "company_id": company_id,
+            "location_id": lid,
+            "location_name": f"Warehouse {lid} ({rng.choice(['North', 'South', 'East', 'West'])})",
+            "location_type": rng.choice(["PLANT", "DC"]),
+            "region": f"REGION_{j % 3}",
+        })
 
     df_materials = pd.DataFrame(materials)
     df_locations = pd.DataFrame(locations)
 
-    # Time
     today = datetime.today().date()
-    history_months = config.get("history_months", 24)
-    forecast_months = config.get("forecast_months", 18)
+    hist_dates = month_range(today, config.get("history_months", 24))
+    fcst_dates = month_range(today + pd.DateOffset(months=18), 18)
 
-    hist_dates = month_range(today, history_months)
-    fcst_dates = month_range(today + pd.DateOffset(months=forecast_months), forecast_months)
-
-    # Demand History & Forecast
-    demand_rows = []
-    forecast_rows = []
+    demand_rows, forecast_rows = [], []
+    
+    # Generate Demand & Forecast
     for _, m in df_materials.iterrows():
         for _, l in df_locations.iterrows():
-            base = rng.uniform(50, 800)  # base monthly demand
-
-            # Demand history
-            demand_series = gen_seasonal_demand_series(
-                periods=len(hist_dates),
-                base_level=base,
-                seasonal_amplitude=rng.uniform(0.1, 0.4),
-                noise_std=rng.uniform(0.05, 0.2),
-                random_state=rng.integers(1, 10_000),
-            )
-            for date, qty in zip(hist_dates, demand_series):
-                demand_rows.append(
-                    {
-                        "company_id": company_id,
-                        "material_id": m["material_id"],
-                        "location_id": l["location_id"],
-                        "date": date.date(),
-                        "qty_demand": qty,
-                    }
-                )
-
-            # Forecast - slightly trend up or down + noise
-            trend_factor = rng.uniform(0.9, 1.1)
-            fcst_series = gen_seasonal_demand_series(
-                periods=len(fcst_dates),
-                base_level=base * trend_factor,
-                seasonal_amplitude=rng.uniform(0.1, 0.4),
-                noise_std=rng.uniform(0.05, 0.2),
-                random_state=rng.integers(1, 10_000),
-            )
-            for date, qty in zip(fcst_dates, fcst_series):
-                forecast_rows.append(
-                    {
-                        "company_id": company_id,
-                        "material_id": m["material_id"],
-                        "location_id": l["location_id"],
-                        "date": date.date(),
-                        "qty_forecast": qty,
-                    }
-                )
+            base = rng.uniform(20, 1000)
+            
+            # Demand
+            d_series = gen_seasonal_demand_series(len(hist_dates), base, 0.3, 0.2, rng.integers(1,1e5))
+            for d, q in zip(hist_dates, d_series):
+                demand_rows.append({"company_id": company_id, "material_id": m["material_id"], "location_id": l["location_id"], "date": d.date(), "qty_demand": q})
+            
+            # Forecast
+            f_series = gen_seasonal_demand_series(len(fcst_dates), base * rng.uniform(0.9, 1.2), 0.3, 0.1, rng.integers(1,1e5))
+            for d, q in zip(fcst_dates, f_series):
+                forecast_rows.append({"company_id": company_id, "material_id": m["material_id"], "location_id": l["location_id"], "date": d.date(), "qty_forecast": q})
 
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
-    # Inventory Snapshot (roughly 1-3 months of coverage)
+    # Inventory Snapshot - BIAS FOR RISK
     inv_rows = []
     snapshot_date = today
-    avg_demand = (
-        df_demand.groupby(["material_id", "location_id"])["qty_demand"]
-        .mean()
-        .reset_index()
-        .rename(columns={"qty_demand": "avg_monthly_demand"})
-    )
+    avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
 
-    for _, row in avg_demand.iterrows():
-        mid = row["material_id"]
-        lid = row["location_id"]
-        amd = row["avg_monthly_demand"]
-        coverage_months = rng.uniform(0.1, 3.0)
-        qty_on_hand = max(0, int(amd * coverage_months + rng.normal(0, amd * 0.1)))
-        inv_rows.append(
-            {
-                "company_id": company_id,
-                "snapshot_date": snapshot_date,
-                "material_id": mid,
-                "location_id": lid,
-                "qty_on_hand": qty_on_hand,
-            }
-        )
+    for _, row in avg_dem.iterrows():
+        mid, lid = row["material_id"], row["location_id"]
+        amd = row["qty_demand"]
+        
+        # Risk Bias Logic:
+        # 30% Critical (Red) -> 0 to 2 days coverage
+        # 30% Warning (Yellow) -> 3 to 10 days coverage
+        # 40% Healthy (Green) -> > 10 days coverage
+        risk_roll = rng.random()
+        
+        if risk_roll < 0.30: # RED
+            cov_days = rng.uniform(0, 2)
+        elif risk_roll < 0.60: # YELLOW
+            cov_days = rng.uniform(2.1, 10)
+        else: # GREEN
+            cov_days = rng.uniform(10.1, 60)
+            
+        qty_on_hand = int(amd/30.0 * cov_days) # approx daily conversion
+        
+        inv_rows.append({
+            "company_id": company_id,
+            "snapshot_date": snapshot_date,
+            "material_id": mid,
+            "location_id": lid,
+            "qty_on_hand": qty_on_hand
+        })
 
     df_inventory = pd.DataFrame(inv_rows)
-
-    # Lead Time History (per item-location, monthly aggregated)
-    lt_rows = []
-    for _, m in df_materials.iterrows():
-        for _, l in df_locations.iterrows():
-            planned_lt = rng.integers(5, 45)  # planned lead time in days
-            lt_variability = rng.uniform(0.1, 0.4)  # as fraction of planned
-            for i in range(history_months):
-                month_end = hist_dates[i].date()
-                # Simulate 1-3 orders per month
-                n_orders = int(rng.integers(1, 4))
-                for _ in range(n_orders):
-                    planned = planned_lt
-                    actual = int(
-                        max(
-                            1,
-                            rng.normal(planned, planned * lt_variability),
-                        )
-                    )
-                    # Cast RNG integer to Python int before using in timedelta to avoid TypeError
-                    order_date = month_end - timedelta(days=actual + int(rng.integers(0, 10)))
-                    receipt_date = order_date + timedelta(days=actual)
-                    lt_rows.append(
-                        {
-                            "company_id": company_id,
-                            "material_id": m["material_id"],
-                            "location_id": l["location_id"],
-                            "planned_lt_days": planned,
-                            "actual_lt_days": actual,
-                            "order_date": order_date,
-                            "receipt_date": receipt_date,
-                        }
-                    )
-
-    df_leadtime = pd.DataFrame(lt_rows)
-
-    # Open Supply Orders (some future POs)
+    
+    # Lead Time & Supply
+    # (Simplified for brevity, just generating Supply Orders)
     po_rows = []
-    po_id_counter = 1
+    po_cnt = 1
     for _, inv in df_inventory.iterrows():
-        mid = inv["material_id"]
-        lid = inv["location_id"]
-        amd = avg_demand.query(
-            "material_id == @mid and location_id == @lid"
-        )["avg_monthly_demand"].values
-        amd = amd[0] if len(amd) else rng.uniform(50, 500)
-
-        # probability of having open supply
-        if rng.random() < 0.6:
-            n_pos = int(rng.integers(1, 3))
-            for _ in range(n_pos):
-                qty = int(max(0, rng.normal(amd, amd * 0.3)))
-                due_in_days = rng.integers(5, 90)
-                due_date = snapshot_date + timedelta(days=int(due_in_days))
-                po_rows.append(
-                    {
-                        "company_id": company_id,
-                        "order_id": f"PO_{po_id_counter:06d}",
-                        "material_id": mid,
-                        "location_id": lid,
-                        "qty_inbound": qty,
-                        "due_date": due_date,
-                        "order_type": "PO",
-                    }
-                )
-                po_id_counter += 1
-
+        # High probability of open orders for low stock items
+        has_po = False
+        if inv["qty_on_hand"] < 100: has_po = rng.random() < 0.9
+        else: has_po = rng.random() < 0.4
+        
+        if has_po:
+            n = rng.integers(1, 4)
+            for _ in range(n):
+                qty = rng.integers(50, 500)
+                # Due dates: some late (negative), some soon
+                days_due = rng.integers(-5, 45) 
+                po_rows.append({
+                    "company_id": company_id,
+                    "order_id": f"PO_{po_cnt:05d}",
+                    "material_id": inv["material_id"],
+                    "location_id": inv["location_id"],
+                    "qty_inbound": qty,
+                    "due_date": snapshot_date + timedelta(days=int(days_due)),
+                    "order_type": "PO"
+                })
+                po_cnt += 1
+                
     df_open_supply = pd.DataFrame(po_rows)
 
     return {
-        "materials": df_materials,
-        "locations": df_locations,
-        "demand": df_demand,
-        "forecast": df_forecast,
-        "inventory": df_inventory,
-        "leadtime": df_leadtime,
-        "open_supply": df_open_supply,
+        "materials": df_materials, "locations": df_locations, "demand": df_demand,
+        "forecast": df_forecast, "inventory": df_inventory, "leadtime": pd.DataFrame(),
+        "open_supply": df_open_supply
     }
 
+# --------------- UI HELPERS --------------- #
 
-# --------------- STREAMLIT APP --------------- #
-
-def _format_number_for_display(x):
-    """Format numeric values with thousands separator using dots (e.g. 1.234.567)."""
-    try:
-        if np.isinf(x):
-            return "∞"
-    except Exception:
-        pass
+def _fmt(x):
+    """Format numeric values with thousands separator."""
     try:
         val = int(round(float(x)))
         return f"{val:,}".replace(",", ".")
-    except Exception:
-        return str(x)
+    except: return str(x)
 
-
-def _risk_color_bg(risk_status):
-    if risk_status == "GREEN":
-        return "#F3FFF6"  # very light green
-    if risk_status == "YELLOW":
-        return "#FFFBEA"  # very light yellow
-    if risk_status == "RED":
-        return "#FFF4F4"  # very light red
-    return "#FFFFFF"
-
-
-def render_risk_cards(df_view, df_forecast):
-    """
-    Render all cards together to avoid multiple iframes and large gaps.
-    Uses a single components.html(...) call to embed the combined HTML.
-    
-    FIX: Injected CSS style block to ensure iframe font matches Streamlit app.
-    """
-    if df_view.empty:
-        st.info("No rows to display.")
-        return
-
-    cards = []
-    for _, row in df_view.sort_values(["risk_status", "coverage_days"], ascending=[True, True]).iterrows():
-        loc_name = row.get("location_name") or row.get("location_id") or ""
-        mat_desc = row.get("material_desc") or row.get("material_id") or ""
-
-        avg_daily = row.get("avg_daily_demand", 0.0)
-        calculated_ss = avg_daily * 14
-        ss_coverage = row.get("coverage_days", np.inf)
-        local_fcst = avg_daily * 30
-
-        display_avg_daily = _format_number_for_display(avg_daily)
-        display_ss = _format_number_for_display(calculated_ss)
-        display_ss_cov = _format_number_for_display(ss_coverage)
-        display_fcst = _format_number_for_display(local_fcst)
-
-        bg = _risk_color_bg(row.get("risk_status"))
-
-        card_html = f"""
-        <div class="irac-card" style="
-            background: {bg};
-            border-radius: 8px;
-            padding: 10px 14px;
-            margin: 6px 0;
-            border: 1px solid rgba(0,0,0,0.04);
-            box-shadow: none;
-            display:flex;
-            align-items:center;
-            gap:12px;
-            box-sizing:border-box;
-            width:100%;
-        ">
-            <div style="flex:0 0 220px; display:flex; align-items:center; gap:10px;">
-                <div style="width:34px; height:34px; border-radius:18px; background:#ffffff; border:1px solid rgba(0,0,0,0.06); display:flex; align-items:center; justify-content:center; font-weight:700; color:#333;">
-                    ▶
-                </div>
-                <div style="line-height:1;">
-                    <div style="font-weight:700; color:#213644; font-size:14px;">{loc_name}</div>
-                    <div style="font-size:12px; color:#6B7A81;">{mat_desc}</div>
-                </div>
-            </div>
-
-            <div style="flex:1; display:flex; justify-content:space-between; gap:18px;">
-                <div style="text-align:left; min-width:120px;">
-                    <div style="font-size:11px; color:#7D98A3; font-weight:700;">AVG DAILY DEMAND</div>
-                    <div style="font-weight:800; color:#213644; margin-top:6px;">{display_avg_daily}</div>
-                </div>
-
-                <div style="text-align:left; min-width:160px;">
-                    <div style="font-size:11px; color:#7D98A3; font-weight:700;">CALCULATED SAFETY STOCK</div>
-                    <div style="font-weight:800; color:#213644; margin-top:6px;">{display_ss}</div>
-                </div>
-
-                <div style="text-align:left; min-width:120px;">
-                    <div style="font-size:11px; color:#7D98A3; font-weight:700;">SS COVERAGE (DAYS)</div>
-                    <div style="margin-top:6px;">
-                        <span style="
-                            display:inline-block;
-                            background:#0B98E8;
-                            color:white;
-                            padding:6px 12px;
-                            border-radius:20px;
-                            font-weight:700;
-                            min-width:44px;
-                            text-align:center;
-                        ">{display_ss_cov}</span>
-                    </div>
-                </div>
-
-                <div style="text-align:left; min-width:160px;">
-                    <div style="font-size:11px; color:#7D98A3; font-weight:700;">LOCAL FORECAST (MONTH)</div>
-                    <div style="margin-top:6px;">
-                        <span style="
-                            display:inline-block;
-                            background:#F6FBFF;
-                            color:#213644;
-                            padding:6px 12px;
-                            border-radius:10px;
-                            border:1px solid rgba(0,0,0,0.04);
-                            font-weight:700;
-                        ">{display_fcst}</span>
-                    </div>
-                </div>
-            </div>
-
-            <div style="flex:0 0 120px; text-align:right;">
-                <div style="font-size:11px; color:#7D98A3; font-weight:700;">RISK</div>
-                <div style="margin-top:6px; font-weight:800; color:#213644;">{row.get('risk_status')}</div>
-            </div>
-        </div>
-        """
-        cards.append(textwrap.dedent(card_html).strip())
-
-    # CSS to inject into the iframe so fonts match Streamlit (Source Sans Pro / System UI)
-    style_block = """
+def _get_card_css():
+    return """
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700;800&display=swap');
-        body {
-            font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            margin: 0;
-            color: #31333F;
+        body { font-family: "Source Sans Pro", sans-serif; margin: 0; color: #31333F; }
+        .card {
+            border-radius: 8px; padding: 12px 16px; margin: 6px 0;
+            border: 1px solid rgba(0,0,0,0.05); display: flex; align-items: center; gap: 15px;
+            font-size: 14px;
         }
+        .pill {
+            display:inline-block; padding:4px 10px; border-radius:12px; font-weight:700; font-size:12px;
+        }
+        .lbl { font-size:11px; color:#7D98A3; font-weight:700; margin-bottom:4px; }
+        .val { font-weight:700; color:#213644; font-size:15px; }
     </style>
     """
 
-    # Combine all cards into one container with the style block at the top
-    combined_html = """
-    {style}
-    <div style="width:100%; box-sizing:border-box; padding:6px 10px;">
-      {cards}
+def render_risk_cards(df_view):
+    if df_view.empty:
+        st.info("No items match filters.")
+        return
+
+    cards_html = [_get_card_css()]
+    
+    # Limit display to avoid browser crash on huge demo data
+    max_display = 100
+    display_df = df_view.sort_values(["coverage_days", "avg_daily_demand"], ascending=[True, False]).head(max_display)
+    
+    for _, row in display_df.iterrows():
+        bg = "#F3FFF6" # Green
+        if row["risk_status"] == "YELLOW": bg = "#FFFBEA"
+        if row["risk_status"] == "RED": bg = "#FFF4F4"
+
+        html = f"""
+        <div class="card" style="background: {bg};">
+            <div style="flex:0 0 200px;">
+                <div style="font-weight:700; color:#111;">{row.get('location_name', row['location_id'])}</div>
+                <div style="color:#666; font-size:12px;">{row.get('material_desc', row['material_id'])}</div>
+            </div>
+            <div style="flex:1; display:flex; gap:20px;">
+                <div><div class="lbl">AVG DEMAND</div><div class="val">{_fmt(row['avg_daily_demand'])}/day</div></div>
+                <div><div class="lbl">ON HAND</div><div class="val">{_fmt(row['qty_on_hand'])}</div></div>
+                <div><div class="lbl">COVERAGE</div>
+                     <span class="pill" style="background:{'#ff4b4b' if row['risk_status']=='RED' else '#ffa421' if row['risk_status']=='YELLOW' else '#21c354'}; color:white;">
+                     {_fmt(row['coverage_days'])} days</span>
+                </div>
+            </div>
+            <div style="flex:0 0 80px; text-align:right;">
+                <div class="lbl">RISK</div>
+                <div style="font-weight:800;">{row['risk_status']}</div>
+            </div>
+        </div>
+        """
+        cards_html.append(textwrap.dedent(html))
+        
+    if len(df_view) > max_display:
+        st.warning(f"Showing top {max_display} most critical items out of {len(df_view)} total.")
+
+    components.html("\n".join(cards_html), height=min(600, len(display_df)*85), scrolling=True)
+
+def render_supply_cards(df_supply):
+    if df_supply.empty:
+        st.info("No open supply orders.")
+        return
+        
+    cards_html = [_get_card_css()]
+    for _, row in df_supply.sort_values("due_date").iterrows():
+        # Late?
+        is_late = pd.to_datetime(row['due_date']) < datetime.now()
+        bg = "#FFF4F4" if is_late else "#F9F9F9"
+        
+        html = f"""
+        <div class="card" style="background:{bg};">
+            <div style="flex:0 0 150px; font-weight:700;">{row['order_id']}</div>
+            <div style="flex:1;">
+                <div class="lbl">DUE DATE</div>
+                <div class="val" style="color:{'#D93025' if is_late else '#333'}">
+                    {pd.to_datetime(row['due_date']).strftime('%Y-%m-%d')}
+                    {' (LATE)' if is_late else ''}
+                </div>
+            </div>
+            <div style="flex:1;">
+                <div class="lbl">QUANTITY</div>
+                <div class="val">{_fmt(row['qty_inbound'])}</div>
+            </div>
+            <div style="flex:1;">
+                 <div class="lbl">TYPE</div>
+                 <div class="pill" style="background:#E8EAED; color:#333;">{row.get('order_type','PO')}</div>
+            </div>
+        </div>
+        """
+        cards_html.append(textwrap.dedent(html))
+        
+    components.html("\n".join(cards_html), height=min(400, len(df_supply)*85), scrolling=True)
+
+def render_inventory_card(row_inv):
+    if row_inv.empty: return
+    # Assuming row_inv is a Series or single row DF
+    if isinstance(row_inv, pd.DataFrame): row_inv = row_inv.iloc[0]
+    
+    css = _get_card_css()
+    html = f"""
+    {css}
+    <div class="card" style="background:#F0F4F8; border-left: 4px solid #0B67A4;">
+        <div style="flex:1;">
+            <div class="lbl">SNAPSHOT DATE</div>
+            <div class="val">{pd.to_datetime(row_inv['snapshot_date']).strftime('%Y-%m-%d')}</div>
+        </div>
+        <div style="flex:1;">
+            <div class="lbl">QTY ON HAND</div>
+            <div class="val" style="font-size:20px;">{_fmt(row_inv['qty_on_hand'])}</div>
+        </div>
+        <div style="flex:1;">
+            <div class="lbl">LOCATION</div>
+            <div class="val">{row_inv['location_id']}</div>
+        </div>
     </div>
-    """.format(style=style_block, cards="\n".join(cards))
+    """
+    components.html(html, height=100)
 
-    combined_html = textwrap.dedent(combined_html).strip()
-
-    # Height heuristic: ~90 px per card, clamped. Use scrolling if content larger than iframe.
-    n = len(cards)
-    per_card_px = 90
-    height = min(900, max(140, int(n * per_card_px)))
-    # If many cards, enable scrolling inside the iframe (components.html's scrolling=True)
-    components.html(combined_html, height=height, scrolling=True)
-
+# --------------- MAIN APP --------------- #
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    # Title area with emoji and release badges
-    col_title, col_badges = st.columns([8, 2])
-    with col_title:
-        # Use an inventory-relevant emoji before the title (📦)
-        st.markdown(
-            f"""
-            <div style="display:flex; align-items:center; gap:12px;">
-                <div style="font-size:44px; line-height:1;">📦</div>
-                <div>
-                    <h1 style="margin:0; font-size:30px; color:#0F2933;">{APP_TITLE}</h1>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col_badges:
-        # Render version and release badges to the right of the title
-        st.markdown(
-            f"""
-            <div style="display:flex; gap:8px; justify-content:flex-end; align-items:center;">
-                <div style="
-                    background:#E6F2FF;
-                    color:#0B67A4;
-                    padding:6px 12px;
-                    border-radius:14px;
-                    font-weight:700;
-                    font-size:12px;
-                ">{RELEASE_VERSION}</div>
-                <div style="
-                    background:linear-gradient(90deg,#F6EEFF,#FFF2FB);
-                    color:#6F2A8B;
-                    padding:6px 12px;
-                    border-radius:14px;
-                    font-weight:700;
-                    font-size:12px;
-                ">{RELEASE_DATE}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    
+    # HEADER
+    c1, c2 = st.columns([3, 1])
+    c1.title(f"📦 {APP_TITLE}")
+    c2.markdown(f"**{RELEASE_VERSION}** | {RELEASE_DATE}")
+    st.markdown("---")
 
-    st.header("")  # small spacer to keep layout consistent
-
-    # --- SIDEBAR: Company & Config ---
-    st.sidebar.header("Company & Configuration")
-
-    company_options = [c["company_id"] for c in DEFAULT_COMPANIES]
-    selected_company = st.sidebar.selectbox("Select company", company_options)
-
-    # For now we use a single default config per company.
-    # Later: load from DB / file.
+    # SIDEBAR
+    st.sidebar.header("Configuration")
+    sel_company = st.sidebar.selectbox("Company", [c["company_id"] for c in DEFAULT_COMPANIES])
     config = DEFAULT_COMPANY_CONFIG.copy()
-
-    # Allow user to tweak a few config parameters
-    st.sidebar.subheader("Planning Settings")
-    config["time_bucket"] = st.sidebar.selectbox(
-        "Time bucket",
-        options=["week", "month"],
-        index=1 if config["time_bucket"] == "month" else 0,
-    )
-    config["planning_horizon_months"] = st.sidebar.slider(
-        "Planning horizon (months)",
-        min_value=1,
-        max_value=24,
-        value=config["planning_horizon_months"],
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Risk Thresholds (Coverage in Days)")
-    rt = config["risk_thresholds"]
-    rt["shortage_days"] = st.sidebar.number_input(
-        "Shortage threshold (≤ days)",
-        min_value=0,
-        max_value=60,
-        value=rt["shortage_days"],
-        step=1,
-    )
-    rt["attention_days"] = st.sidebar.number_input(
-        "Attention if coverage ≤ days",
-        min_value=1,
-        max_value=60,
-        value=rt["attention_days"],
-        step=1,
-    )
-    rt["excess_days"] = st.sidebar.number_input(
-        "Excess if coverage ≥ days",
-        min_value=30,
-        max_value=365,
-        value=rt["excess_days"],
-        step=5,
-    )
-
-    config["risk_thresholds"] = rt
-
-    # --- MAIN: Data Upload & Demo Data --- #
-    st.header("1. Load Baseline Data")
-
-    st.markdown(
-        """
-IRAC requires a small standard dataset:
-- Historical demand
-- Forecast
-- Inventory snapshot
-- Lead time history
-- Open supply orders (optional but recommended)
-- Material & location masters (optional, for nicer labels)
-
-You can either:
-
-- **Upload your own CSV files**, or  
-- **Click "Load Demo Data"** to auto-generate realistic fake data and test the app.
-"""
-    )
-
-    col_demo, col_info = st.columns([1, 3])
-
-    with col_demo:
-        if st.button("Load Demo Data (Generate Fake Company Dataset)"):
-            demo = generate_demo_data(company_id=selected_company, config=config)
-
-            # Cache in session_state as if they came from uploads
-            st.session_state["demo_data"] = demo
-            st.success("Demo data generated and loaded into the app.")
-
-    with col_info:
-        st.info(
-            "Tip: Start by clicking **Load Demo Data**. "
-            "You can then inspect the tables and risk classification before integrating real data."
-        )
-
-    st.markdown("---")
-
-    # Uploaders
-    st.subheader("Upload Baseline Files (CSV)")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        uploaded_demand = st.file_uploader(
-            "Historical Demand (demand_history.csv)",
-            type=["csv"],
-            key="upload_demand",
-        )
-        uploaded_forecast = st.file_uploader(
-            "Forecast (forecast.csv)",
-            type=["csv"],
-            key="upload_forecast",
-        )
-        uploaded_inventory = st.file_uploader(
-            "Inventory Snapshot (inventory_snapshot.csv)",
-            type=["csv"],
-            key="upload_inventory",
-        )
-
-    with col2:
-        uploaded_leadtime = st.file_uploader(
-            "Lead Time History (leadtime_history.csv)",
-            type=["csv"],
-            key="upload_leadtime",
-        )
-        uploaded_open_supply = st.file_uploader(
-            "Open Supply Orders (open_supply.csv)",
-            type=["csv"],
-            key="upload_open_supply",
-        )
-        uploaded_materials = st.file_uploader(
-            "Material Master (materials.csv) [optional]",
-            type=["csv"],
-            key="upload_materials",
-        )
-        uploaded_locations = st.file_uploader(
-            "Location Master (locations.csv) [optional]",
-            type=["csv"],
-            key="upload_locations",
-        )
-
-    # Decide whether to use demo data or uploaded data
-    use_demo = "demo_data" in st.session_state and st.session_state["demo_data"] is not None
-
-    if use_demo:
-        demo = st.session_state["demo_data"]
-        df_materials = demo["materials"]
-        df_locations = demo["locations"]
-        df_demand = demo["demand"]
-        df_forecast = demo["forecast"]
-        df_inventory = demo["inventory"]
-        df_leadtime = demo["leadtime"]
-        df_open_supply = demo["open_supply"]
-    else:
-        df_materials = parse_uploaded_csv(uploaded_materials) if uploaded_materials else pd.DataFrame()
-        df_locations = parse_uploaded_csv(uploaded_locations) if uploaded_locations else pd.DataFrame()
-        df_demand = parse_uploaded_csv(uploaded_demand) if uploaded_demand else pd.DataFrame()
-        df_forecast = parse_uploaded_csv(uploaded_forecast) if uploaded_forecast else pd.DataFrame()
-        df_inventory = parse_uploaded_csv(uploaded_inventory) if uploaded_inventory else pd.DataFrame()
-        df_leadtime = parse_uploaded_csv(uploaded_leadtime) if uploaded_leadtime else pd.DataFrame()
-        df_open_supply = parse_uploaded_csv(uploaded_open_supply) if uploaded_open_supply else pd.DataFrame()
-
-    # Validate minimal required data
-    required_loaded = not df_demand.empty and not df_inventory.empty
-
-    if not required_loaded:
-        st.warning(
-            "Minimal required files: **Historical Demand** and **Inventory Snapshot**.\n\n"
-            "Either upload them, or click **Load Demo Data**."
-        )
-        # If no minimal data, we still show some info tables if present, but skip computations
-    else:
-        st.success("Minimal required data is loaded. You can now explore risk and coverage.")
-
-    # --------------- PREVIEW DATA --------------- #
-    with st.expander("Preview Loaded DataFrames"):
-        st.write("**Materials**")
-        st.dataframe(df_materials.head(20))
-        st.write("**Locations**")
-        st.dataframe(df_locations.head(20))
-        st.write("**Demand History**")
-        st.dataframe(df_demand.head(20))
-        st.write("**Forecast**")
-        st.dataframe(df_forecast.head(20))
-        st.write("**Inventory Snapshot**")
-        st.dataframe(df_inventory.head(20))
-        st.write("**Lead Time History**")
-        st.dataframe(df_leadtime.head(20))
-        st.write("**Open Supply Orders**")
-        st.dataframe(df_open_supply.head(20))
-
-    # --------------- ANALYSIS: COVERAGE & RISK --------------- #
-    st.markdown("---")
-    st.header("2. Inventory Coverage & Risk Classification")
-
-    if not required_loaded:
-        st.info("Once minimal data is loaded, this section will compute coverage and risk status.")
+    
+    # DATA LOADING
+    st.header("1. Data Loading")
+    col_btn, col_txt = st.columns([1, 4])
+    if col_btn.button("Generate & Load Demo Data"):
+        with st.spinner("Generating large dataset..."):
+            data = generate_demo_data(sel_company, config)
+            st.session_state["data"] = data
+            st.success("Data Loaded!")
+    
+    if "data" not in st.session_state:
+        st.info("Please click the button above to load data.")
         return
 
-    # Ensure basic schema
-    for name, df in [
-        ("Demand", df_demand),
-        ("Inventory", df_inventory),
-    ]:
-        missing_cols = []
-        if name == "Demand":
-            for col in ["material_id", "location_id", "date", "qty_demand"]:
-                if col not in df.columns:
-                    missing_cols.append(col)
-        elif name == "Inventory":
-            for col in ["material_id", "location_id", "snapshot_date", "qty_on_hand"]:
-                if col not in df.columns:
-                    missing_cols.append(col)
+    data = st.session_state["data"]
+    
+    # PRE-PROCESSING
+    df_inv = data["inventory"].copy()
+    df_inv["snapshot_date"] = pd.to_datetime(df_inv["snapshot_date"])
+    df_dem = data["demand"].copy()
+    df_dem["date"] = pd.to_datetime(df_dem["date"])
+    
+    avg_daily = compute_avg_daily_demand(df_dem)
+    df_risk = classify_risk(df_inv, avg_daily, config)
+    
+    # Merge Metadata
+    df_risk = df_risk.merge(data["materials"][["material_id", "material_desc", "abc_class"]], on="material_id", how="left")
+    df_risk = df_risk.merge(data["locations"][["location_id", "location_name", "region"]], on="location_id", how="left")
 
-        if missing_cols:
-            st.error(
-                f"{name} data is missing expected columns: {missing_cols}. "
-                f"Please check your uploaded CSV or adjust the demo generator."
-            )
-            return
+    # METRICS
+    st.markdown("### 📊 High-Level KPIs")
+    m1, m2, m3, m4 = st.columns(4)
+    n_red = len(df_risk[df_risk["risk_status"]=="RED"])
+    n_yel = len(df_risk[df_risk["risk_status"]=="YELLOW"])
+    n_tot = len(df_risk)
+    
+    m1.metric("Total SKU-Locations", n_tot)
+    m2.metric("Critical Shortages (RED)", n_red, delta=f"{n_red/n_tot:.1%}", delta_color="inverse")
+    m3.metric("Low Coverage (YELLOW)", n_yel, delta=f"{n_yel/n_tot:.1%}", delta_color="inverse")
+    m4.metric("Avg Coverage", f"{df_risk['coverage_days'].replace([np.inf, -np.inf], np.nan).median():.1f} days")
 
-    # Type coercion
-    df_demand["date"] = pd.to_datetime(df_demand["date"])
-    df_inventory["snapshot_date"] = pd.to_datetime(df_inventory["snapshot_date"])
-
-    avg_daily_df = compute_avg_daily_demand(df_demand)
-    df_risk = classify_risk(df_inventory, avg_daily_df, config=config)
-
-    st.subheader("Risk Summary (per Item-Location)")
-
-    # Add optional joins for nicer display
-    if not df_materials.empty:
-        df_risk = df_risk.merge(
-            df_materials[["material_id", "material_desc", "abc_class"]],
-            on="material_id",
-            how="left",
-        )
-
-    if not df_locations.empty:
-        df_risk = df_risk.merge(
-            df_locations[["location_id", "location_name", "region"]],
-            on="location_id",
-            how="left",
-        )
-
-    # Filters
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
-        abc_filter = st.multiselect(
-            "Filter by ABC class",
-            options=sorted(df_risk["abc_class"].dropna().unique().tolist())
-            if "abc_class" in df_risk.columns
-            else [],
-            default=None,
-        )
-    with col_f2:
-        region_filter = st.multiselect(
-            "Filter by Region",
-            options=sorted(df_risk["region"].dropna().unique().tolist())
-            if "region" in df_risk.columns
-            else [],
-            default=None,
-        )
-    with col_f3:
-        risk_filter = st.multiselect(
-            "Filter by Risk Status",
-            options=sorted(df_risk["risk_status"].dropna().unique().tolist()),
-            default=None,
-        )
+    # SECTION 2: RISK
+    st.markdown("---")
+    st.header("2. Risk Analysis")
+    
+    f1, f2, f3 = st.columns(3)
+    ft_risk = f1.multiselect("Filter Status", ["RED", "YELLOW", "GREEN"], default=["RED", "YELLOW"])
+    ft_abc = f2.multiselect("Filter ABC", ["A", "B", "C"])
+    ft_loc = f3.multiselect("Filter Region", sorted(df_risk["region"].dropna().unique()))
 
     df_view = df_risk.copy()
-    if abc_filter:
-        df_view = df_view[df_view["abc_class"].isin(abc_filter)]
-    if region_filter:
-        df_view = df_view[df_view["region"].isin(region_filter)]
-    if risk_filter:
-        df_view = df_view[df_view["risk_status"].isin(risk_filter)]
+    if ft_risk: df_view = df_view[df_view["risk_status"].isin(ft_risk)]
+    if ft_abc: df_view = df_view[df_view["abc_class"].isin(ft_abc)]
+    if ft_loc: df_view = df_view[df_view["region"].isin(ft_loc)]
 
-    # Render custom card-like rows instead of a plain dataframe to match the requested layout
-    render_risk_cards(df_view, df_forecast)
+    c_risk_table, c_risk_chart = st.columns([3, 2])
+    
+    with c_risk_table:
+        st.subheader("Priority Action List")
+        render_risk_cards(df_view)
 
-    # Quick aggregated view (kept as chart)
-    st.subheader("Risk Distribution")
+    with c_risk_chart:
+        st.subheader("Risk Matrix (Demand vs Coverage)")
+        # Scatter Plot: X=AvgDailyDemand, Y=Coverage, Color=Risk
+        # We clamp coverage to 60 days for visualization so charts don't squash
+        df_chart = df_view.copy()
+        df_chart["vis_coverage"] = df_chart["coverage_days"].clip(upper=60)
+        
+        chart = alt.Chart(df_chart).mark_circle(size=80).encode(
+            x=alt.X('avg_daily_demand', title='Avg Daily Demand'),
+            y=alt.Y('vis_coverage', title='Coverage (Days) [Capped at 60]'),
+            color=alt.Color('risk_status', scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], range=['#D93025', '#F9AB00', '#1E8E3E'])),
+            tooltip=['material_id', 'location_id', 'coverage_days', 'avg_daily_demand']
+        ).interactive()
+        st.altair_chart(chart, use_container_width=True)
 
-    risk_counts = (
-        df_risk["risk_status"].value_counts().rename_axis("risk_status").reset_index(name="count")
-    )
-    st.bar_chart(
-        data=risk_counts.set_index("risk_status"),
-        use_container_width=True,
-    )
-
-    # --------------- ITEM-LEVEL DRILLDOWN --------------- #
+    # SECTION 3: DRILLDOWN
     st.markdown("---")
-    st.header("3. Item-Level Drilldown (Demand, Inventory, Supply)")
+    st.header("3. Detailed Planning View")
+    
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        s_mat = st.selectbox("Select Material", sorted(df_risk["material_id"].unique()))
+    with col_sel2:
+        # Filter locations valid for this material
+        valid_locs = df_risk[df_risk["material_id"] == s_mat]["location_id"].unique()
+        s_loc = st.selectbox("Select Location", sorted(valid_locs))
 
-    # Drilldown selectors
-    unique_items = sorted(df_risk["material_id"].unique().tolist())
-    unique_locs = sorted(df_risk["location_id"].unique().tolist())
+    # PREPARE DRILLDOWN DATA
+    dd_hist = df_dem[(df_dem["material_id"]==s_mat) & (df_dem["location_id"]==s_loc)].copy()
+    dd_fcst = data["forecast"][(data["forecast"]["material_id"]==s_mat) & (data["forecast"]["location_id"]==s_loc)].copy()
+    dd_inv = df_inv[(df_inv["material_id"]==s_mat) & (df_inv["location_id"]==s_loc)].copy()
+    dd_supp = data["open_supply"][(data["open_supply"]["material_id"]==s_mat) & (data["open_supply"]["location_id"]==s_loc)].copy()
 
-    col_i1, col_i2 = st.columns(2)
-    with col_i1:
-        sel_item = st.selectbox("Select Material", unique_items)
-    with col_i2:
-        sel_loc = st.selectbox("Select Location", unique_locs)
+    # LAYOUT: Top = Charts, Bottom = Card Tables
+    tab1, tab2 = st.tabs(["📉 Demand & Supply Projection", "📋 Transaction Details"])
 
-    # Filter for selected item/location
-    d_hist = df_demand.query(
-        "material_id == @sel_item and location_id == @sel_loc"
-    ).copy()
-    d_fcst = df_forecast.query(
-        "material_id == @sel_item and location_id == @sel_loc"
-    ).copy() if not df_forecast.empty else pd.DataFrame()
-    d_inv = df_inventory.query(
-        "material_id == @sel_item and location_id == @sel_loc"
-    ).copy()
-    d_os = df_open_supply.query(
-        "material_id == @sel_item and location_id == @sel_loc"
-    ).copy() if not df_open_supply.empty else pd.DataFrame()
-
-    # Time-series chart: demand history + forecast
-    st.subheader("Demand History & Forecast")
-
-    ts_hist = d_hist[["date", "qty_demand"]].rename(columns={"qty_demand": "demand"})
-    ts_hist.set_index("date", inplace=True)
-
-    if not d_fcst.empty:
-        d_fcst["date"] = pd.to_datetime(d_fcst["date"])
-        ts_fcst = d_fcst[["date", "qty_forecast"]].rename(
-            columns={"qty_forecast": "forecast"}
+    with tab1:
+        # 1. Demand vs Forecast Chart (Altair)
+        c_hist = alt.Chart(dd_hist).mark_line(color='gray').encode(
+            x='date', y='qty_demand', tooltip=['date', 'qty_demand']
         )
-        ts_fcst.set_index("date", inplace=True)
-        ts_all = ts_hist.join(ts_fcst, how="outer")
-    else:
-        ts_all = ts_hist
+        c_fcst = alt.Chart(dd_fcst).mark_line(strokeDash=[5,5], color='blue').encode(
+            x='date', y='qty_forecast', tooltip=['date', 'qty_forecast']
+        )
+        
+        st.subheader("Demand History vs Forecast")
+        st.altair_chart((c_hist + c_fcst).interactive(), use_container_width=True)
+        
+        # 2. Projected Inventory Balance (NEW VISUAL)
+        st.subheader("Projected Inventory Balance (90 Days)")
+        
+        # Simple daily projection logic
+        if not dd_inv.empty:
+            start_stock = dd_inv.iloc[0]["qty_on_hand"]
+            avg_daily_fcst = dd_fcst["qty_forecast"].mean() / 30.0 if not dd_fcst.empty else 0
+            
+            # Create 90 day range
+            today = pd.Timestamp.today().normalize()
+            dates = pd.date_range(today, periods=90, freq='D')
+            proj_df = pd.DataFrame({"date": dates})
+            
+            # 1. Outflow (Forecast)
+            proj_df["outflow"] = avg_daily_fcst
+            
+            # 2. Inflow (Supply)
+            proj_df["inflow"] = 0
+            if not dd_supp.empty:
+                supp_agg = dd_supp.groupby("due_date")["qty_inbound"].sum().reset_index()
+                supp_agg["due_date"] = pd.to_datetime(supp_agg["due_date"])
+                proj_df = proj_df.merge(supp_agg, left_on="date", right_on="due_date", how="left").fillna(0)
+                proj_df["inflow"] = proj_df["qty_inbound"]
+            
+            # 3. CumSum
+            proj_df["net_change"] = proj_df["inflow"] - proj_df["outflow"]
+            proj_df["projected_stock"] = start_stock + proj_df["net_change"].cumsum()
+            
+            # 4. Chart with Threshold Zones
+            # Define safety stock line (e.g., 10 days of demand)
+            ss_level = avg_daily_fcst * 10
+            
+            base = alt.Chart(proj_df).encode(x='date')
+            line = base.mark_line(color='#0B67A4').encode(y=alt.Y('projected_stock', title='Projected Stock'))
+            
+            # Red zone area (below 0)
+            rule0 = base.mark_rule(color='red', strokeWidth=2).encode(y=alt.datum(0))
+            # SS Rule
+            ruless = base.mark_rule(color='orange', strokeDash=[3,3]).encode(y=alt.datum(ss_level))
+            
+            st.altair_chart((line + rule0 + ruless).interactive(), use_container_width=True)
+            st.caption("Blue: Projected Stock | Orange Dashed: Estimated Safety Stock (10 days) | Red: Stockout")
 
-    st.line_chart(ts_all, use_container_width=True)
-
-    # Show inventory and open supply
-    st.subheader("Inventory & Open Supply")
-
-    if not d_inv.empty:
-        st.write("**Inventory Snapshot**")
-        st.dataframe(d_inv)
-    else:
-        st.write("No inventory snapshot for this item-location.")
-
-    if not d_os.empty:
-        st.write("**Open Supply Orders**")
-        st.dataframe(d_os)
-    else:
-        st.write("No open supply orders for this item-location.")
-
+    with tab2:
+        c_inv, c_supp = st.columns(2)
+        with c_inv:
+            st.subheader("Current Inventory")
+            render_inventory_card(dd_inv)
+        with c_supp:
+            st.subheader("Inbound Supply Orders")
+            render_supply_cards(dd_supp)
 
 if __name__ == "__main__":
     main()
