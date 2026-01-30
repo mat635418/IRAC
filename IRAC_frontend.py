@@ -23,7 +23,7 @@ DEFAULT_COMPANY_CONFIG = {
     "history_months": 24,
     "forecast_months": 18,
     "planning_horizon_months": 6,
-    "service_levels": {"default": 0.99}, # 99% Service Level
+    "service_levels": {"default": 0.95}, # 95% Service Level
     "risk_thresholds": {
         "shortage_days": 2,    # Very critical
         "attention_days": 10,  # Warning zone
@@ -662,9 +662,12 @@ def main():
             st.dataframe(
                 df_excess[["material_id", "location_id", "coverage_days", "qty_on_hand", "total_value"]]
                 .sort_values("coverage_days", ascending=False)
-                .head(10)
-                .style.format({"coverage_days": "{:,.0f}", "qty_on_hand": "{:,.0f}", "total_value": "${:,.0f}"})
-                .background_gradient(subset=["coverage_days"], cmap="Reds"),
+                .head(10),
+                column_config={
+                    "coverage_days": st.column_config.NumberColumn("Coverage Days", format="%d"),
+                    "qty_on_hand": st.column_config.NumberColumn("On Hand", format="%d"),
+                    "total_value": st.column_config.NumberColumn("Total Value", format="$%d"),
+                },
                 use_container_width=True
             )
     else:
@@ -797,12 +800,23 @@ def main():
         c1, c2 = st.columns([3, 1])
         with c1:
             st.markdown("##### 🚀 Proposed Stock Transfers (To restore corridor health)")
+            # Replaced style.background_gradient with st.column_config.ProgressColumn
             st.dataframe(
                 mrp_df[["material_id", "location_id", "risk_status", "qty_on_hand", "qty_inbound", "max_qty", "transfer_proposal"]]
-                .sort_values("transfer_proposal", ascending=False)
-                .style.format({"qty_on_hand": "{:,.0f}", "transfer_proposal": "{:,.0f}"})
-                .background_gradient(subset=["transfer_proposal"], cmap="Greens"),
-                use_container_width=True
+                .sort_values("transfer_proposal", ascending=False),
+                column_config={
+                    "qty_on_hand": st.column_config.NumberColumn("Current Stock", format="%d"),
+                    "qty_inbound": st.column_config.NumberColumn("Inbound", format="%d"),
+                    "max_qty": st.column_config.NumberColumn("Max Target", format="%d"),
+                    "transfer_proposal": st.column_config.ProgressColumn(
+                        "Suggested Order",
+                        format="%d",
+                        min_value=0,
+                        max_value=int(mrp_df["transfer_proposal"].max()),
+                    ),
+                },
+                use_container_width=True,
+                hide_index=True
             )
         with c2:
             st.markdown("##### Proposal by Location")
