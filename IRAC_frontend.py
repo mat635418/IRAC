@@ -5,13 +5,12 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import altair as alt
-from scipy.stats import norm
 from datetime import datetime, timedelta
 
 # --------------- CONFIG / CONSTANTS --------------- #
 
 APP_TITLE = "IRAC - Inventory Risk & Availability Control"
-RELEASE_VERSION = "v 0.60"
+RELEASE_VERSION = "v 0.61"
 RELEASE_DATE = "Released Feb 2026"
 
 DEFAULT_COMPANIES = [
@@ -80,6 +79,23 @@ def compute_demand_stats(df_demand: pd.DataFrame) -> pd.DataFrame:
     
     return agg
 
+def get_z_score(service_level):
+    """
+    Returns Z-score for common service levels to avoid scipy dependency.
+    """
+    # Standard Normal Distribution Table (approx)
+    lookup = {
+        0.50: 0.00,
+        0.80: 0.84,
+        0.90: 1.28,
+        0.95: 1.645,
+        0.98: 2.055,
+        0.99: 2.33,
+        0.999: 3.09
+    }
+    # Return closest or default to 1.645 (95%)
+    return lookup.get(service_level, 1.645)
+
 def calculate_inventory_parameters(df_risk, config):
     """
     Method 5 Logic:
@@ -89,7 +105,7 @@ def calculate_inventory_parameters(df_risk, config):
     """
     # Service Level Z-Score
     sl = config["service_levels"]["default"]
-    z_score = norm.ppf(sl) # e.g. 1.645 for 95%
+    z_score = get_z_score(sl)
     
     # We assume 'lead_time_days' is in the dataframe (generated or uploaded)
     # If not, default to 10
