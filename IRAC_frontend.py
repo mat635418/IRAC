@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 # --------------- CONFIG / CONSTANTS --------------- #
 
 APP_TITLE = "IRAC - Inventory Risk & Availability Control (Frontend MVP)"
+# UI release metadata (displayed next to the title)
+RELEASE_VERSION = "v 0.35"
+RELEASE_DATE = "Released Jan 2026"
 
 DEFAULT_COMPANIES = [
     {"company_id": "COMPANY_A", "name": "Company A"},
@@ -29,7 +32,7 @@ DEFAULT_COMPANY_CONFIG = {
     "risk_thresholds": {
         "shortage_days": 0,   # stockout or negative coverage
         "attention_days": 7,  # coverage < 7 days -> YELLOW
-        "excess_days": 90,    # coverage > 90 days -> BLUE
+        "excess_days": 90,    # coverage > 90 days -> BLUE (not used in GREEN/YELLOW/RED mapping)
     },
     "aggregation": {
         "default_level": "location",
@@ -125,6 +128,9 @@ def classify_risk(
     df_inventory: snapshot with columns [material_id, location_id, snapshot_date, qty_on_hand]
     avg_daily: per item-location avg_daily_demand
     config: company config with risk thresholds
+
+    NOTE: This version returns simplified risk_status values: 'GREEN', 'YELLOW', 'RED'
+    based on the configured thresholds. (User requested only GREEN / YELLOW / RED.)
     """
     if df_inventory is None or df_inventory.empty:
         return pd.DataFrame()
@@ -139,7 +145,7 @@ def classify_risk(
     df["avg_daily_demand"].fillna(0.0, inplace=True)
 
     # Coverage in days
-    # If avg_daily_demand == 0, treat coverage as very large (or 0).
+    # If avg_daily_demand == 0, treat coverage as very large (inf)
     df["coverage_days"] = np.where(
         df["avg_daily_demand"] > 0,
         df["qty_on_hand"] / df["avg_daily_demand"],
@@ -147,16 +153,16 @@ def classify_risk(
     )
 
     thr = config["risk_thresholds"]
+
     def risk_label(row):
         cov = row["coverage_days"]
         if cov <= thr["shortage_days"]:
-            return "RED - shortage"
+            return "RED"
         elif cov <= thr["attention_days"]:
-            return "YELLOW - attention"
-        elif cov >= thr["excess_days"]:
-            return "BLUE - excess"
+            return "YELLOW"
         else:
-            return "GREEN - healthy"
+            # treat all other cases as GREEN (including very high coverage)
+            return "GREEN"
 
     df["risk_status"] = df.apply(risk_label, axis=1)
     return df
@@ -388,10 +394,176 @@ def generate_demo_data(
 
 # --------------- STREAMLIT APP --------------- #
 
+def _format_number_for_display(x):
+    """Format numeric values with thousands separator using dots (e.g. 1.234.567)."""
+    try:
+        if np.isinf(x):
+            return "∞"
+    except Exception:
+        pass
+    try:
+        val = int(round(float(x)))
+        return f"{val:,}".replace(",", ".")
+    except Exception:
+        return str(x)
+
+
+def _risk_color_bg(risk_status):
+    if risk_status == "GREEN":
+        return "#F3FFF6"  # very light green
+    if risk_status == "YELLOW":
+        return "#FFFBEA"  # very light yellow
+    if risk_status == "RED":
+        return "#FFF4F4"  # very light red
+    return "#FFFFFF"
+
+
+def render_risk_cards(df_view, df_forecast):
+    """
+    Render the custom horizontal "cards" matching the example layout for each
+    item-location row in df_view.
+    """
+    if df_view.empty:
+        st.info("No rows to display.")
+        return
+
+    # For quick forecast/month calculation we'll approximate month forecast as avg_daily_demand * 30
+    for _, row in df_view.sort_values(["risk_status", "coverage_days"], ascending=[True, True]).iterrows():
+        loc_name = row.get("location_name") or row.get("location_id") or ""
+        mat_desc = row.get("material_desc") or row.get("material_id") or ""
+
+        avg_daily = row.get("avg_daily_demand", 0.0)
+        # Calculated safety stock - simple placeholder: two weeks of demand
+        calculated_ss = avg_daily * 14
+        # SS coverage (days) - use coverage_days field (may be inf)
+        ss_coverage = row.get("coverage_days", np.inf)
+        # local forecast (month) - approximate monthly demand as avg_daily * 30 (if forecast data not present)
+        local_fcst = avg_daily * 30
+
+        display_avg_daily = _format_number_for_display(avg_daily)
+        display_ss = _format_number_for_display(calculated_ss)
+        display_ss_cov = _format_number_for_display(ss_coverage)
+        display_fcst = _format_number_for_display(local_fcst)
+
+        bg = _risk_color_bg(row.get("risk_status"))
+
+        # Build HTML block
+        html = f"""
+        <div style="
+            background: {bg};
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            border: 1px solid rgba(0,0,0,0.04);
+        ">
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div style="flex:0 0 220px; display:flex; align-items:center; gap:10px;">
+                    <div style="width:34px; height:34px; border-radius:18px; background:#ffffff; border:1px solid rgba(0,0,0,0.06); display:flex; align-items:center; justify-content:center; font-weight:700; color:#333;">
+                        ▶
+                    </div>
+                    <div style="line-height:1;">
+                        <div style="font-weight:700; color:#213644; font-size:14px;">{loc_name}</div>
+                        <div style="font-size:12px; color:#6B7A81;">{mat_desc}</div>
+                    </div>
+                </div>
+
+                <div style="flex:1; display:flex; justify-content:space-between; gap:18px;">
+                    <div style="text-align:left;">
+                        <div style="font-size:11px; color:#7D98A3; font-weight:700;">AVG DAILY DEMAND</div>
+                        <div style="font-weight:800; color:#213644; margin-top:6px;">{display_avg_daily}</div>
+                    </div>
+
+                    <div style="text-align:left;">
+                        <div style="font-size:11px; color:#7D98A3; font-weight:700;">CALCULATED SAFETY STOCK</div>
+                        <div style="font-weight:800; color:#213644; margin-top:6px;">{display_ss}</div>
+                    </div>
+
+                    <div style="text-align:left;">
+                        <div style="font-size:11px; color:#7D98A3; font-weight:700;">SS COVERAGE (DAYS)</div>
+                        <div style="margin-top:6px;">
+                            <span style="
+                                display:inline-block;
+                                background:#0B98E8;
+                                color:white;
+                                padding:6px 12px;
+                                border-radius:20px;
+                                font-weight:700;
+                                min-width:44px;
+                                text-align:center;
+                            ">{display_ss_cov}</span>
+                        </div>
+                    </div>
+
+                    <div style="text-align:left;">
+                        <div style="font-size:11px; color:#7D98A3; font-weight:700;">LOCAL FORECAST (MONTH)</div>
+                        <div style="margin-top:6px;">
+                            <span style="
+                                display:inline-block;
+                                background:#F6FBFF;
+                                color:#213644;
+                                padding:6px 12px;
+                                border-radius:10px;
+                                border:1px solid rgba(0,0,0,0.04);
+                                font-weight:700;
+                            ">{display_fcst}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="flex:0 0 120px; text-align:right;">
+                    <div style="font-size:11px; color:#7D98A3; font-weight:700;">RISK</div>
+                    <div style="margin-top:6px; font-weight:800; color:#213644;">{row.get('risk_status')}</div>
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.title(APP_TITLE)
+    # Title area with emoji and release badges
+    col_title, col_badges = st.columns([8, 2])
+    with col_title:
+        # Use an inventory-relevant emoji before the title (📦)
+        st.markdown(
+            f"""
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div style="font-size:44px; line-height:1;">📦</div>
+                <div>
+                    <h1 style="margin:0; font-size:30px; color:#0F2933;">{APP_TITLE}</h1>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_badges:
+        # Render version and release badges to the right of the title
+        st.markdown(
+            f"""
+            <div style="display:flex; gap:8px; justify-content:flex-end; align-items:center;">
+                <div style="
+                    background:#E6F2FF;
+                    color:#0B67A4;
+                    padding:6px 12px;
+                    border-radius:14px;
+                    font-weight:700;
+                    font-size:12px;
+                ">{RELEASE_VERSION}</div>
+                <div style="
+                    background:linear-gradient(90deg,#F6EEFF,#FFF2FB);
+                    color:#6F2A8B;
+                    padding:6px 12px;
+                    border-radius:14px;
+                    font-weight:700;
+                    font-size:12px;
+                ">{RELEASE_DATE}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.header("")  # small spacer to keep layout consistent
 
     # --- SIDEBAR: Company & Config ---
     st.sidebar.header("Company & Configuration")
@@ -663,11 +835,10 @@ You can either:
     if risk_filter:
         df_view = df_view[df_view["risk_status"].isin(risk_filter)]
 
-    st.dataframe(
-        df_view.sort_values(["risk_status", "coverage_days"], ascending=[True, True])
-    )
+    # Render custom card-like rows instead of a plain dataframe to match the requested layout
+    render_risk_cards(df_view, df_forecast)
 
-    # Quick aggregated view
+    # Quick aggregated view (kept as chart)
     st.subheader("Risk Distribution")
 
     risk_counts = (
