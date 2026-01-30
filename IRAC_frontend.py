@@ -3,6 +3,7 @@ import textwrap
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 
 # --------------- CONFIG / CONSTANTS --------------- #
@@ -423,6 +424,8 @@ def render_risk_cards(df_view, df_forecast):
     """
     Render the custom horizontal "cards" matching the example layout for each
     item-location row in df_view.
+    Uses components.html(...) instead of st.markdown so the HTML/CSS is embedded
+    and not escaped/sanitized.
     """
     if df_view.empty:
         st.info("No rows to display.")
@@ -451,12 +454,17 @@ def render_risk_cards(df_view, df_forecast):
         # Build HTML block
         html = f"""
         <div style="
+            width:100%;
+            box-sizing:border-box;
+            padding:8px 18px;
+        ">
+          <div style="
             background: {bg};
             border-radius: 10px;
             padding: 10px 12px;
             margin-bottom: 10px;
             border: 1px solid rgba(0,0,0,0.04);
-        ">
+          ">
             <div style="display:flex; align-items:center; gap:12px;">
                 <div style="flex:0 0 220px; display:flex; align-items:center; gap:10px;">
                     <div style="width:34px; height:34px; border-radius:18px; background:#ffffff; border:1px solid rgba(0,0,0,0.06); display:flex; align-items:center; justify-content:center; font-weight:700; color:#333;">
@@ -516,11 +524,19 @@ def render_risk_cards(df_view, df_forecast):
                     <div style="margin-top:6px; font-weight:800; color:#213644;">{row.get('risk_status')}</div>
                 </div>
             </div>
+          </div>
         </div>
         """
-        # Remove indentation so Markdown does not treat HTML as a code block
+
+        # Dedent/strip for cleanliness
         html = textwrap.dedent(html).strip()
-        st.markdown(html, unsafe_allow_html=True)
+
+        # Heuristic height: base + lines * 12px (so content fits). Clamp to reasonable bounds.
+        lines = max(8, len(html.splitlines()))
+        height = max(120, min(700, int(lines * 12)))
+
+        # Use components.html to embed the HTML directly (avoids Markdown escaping issues)
+        components.html(html, height=height, scrolling=False)
 
 
 def main():
