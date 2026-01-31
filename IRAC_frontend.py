@@ -212,7 +212,7 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
-       inv_rows = []
+    inv_rows = []
     snapshot_date = today
     avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
 
