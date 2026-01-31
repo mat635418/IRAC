@@ -212,29 +212,40 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
-    inv_rows = []
+       inv_rows = []
     snapshot_date = today
     avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
 
     for _, row in avg_dem.iterrows():
         mid, lid = row["material_id"], row["location_id"]
         amd = row["qty_demand"]
-        
-        # Risk Logic & MASSIVE Outlier Generation
+
+        # More realistic replenishment logic:
+        # - About 7% RED, 13% YELLOW, 80% GREEN (previous was ~15/35/50)
+        # - GREEN: 80% of items, 50% ~14-40 days (around order cycle), rest distributed with 10% up to 100 days, 20% higher (rare excess)
         risk_roll = rng.random()
-        
-        if risk_roll < 0.15: # RED
-            cov_days = rng.uniform(0, 2)
-        elif risk_roll < 0.35: # YELLOW
-            cov_days = rng.uniform(2.1, 10)
-        else: # GREEN
-            # 15% Chance of being MASSIVE EXTREME (100 - 600 days)
-            if rng.random() < 0.15: 
-                cov_days = rng.uniform(100, 600)
-            else: 
-                cov_days = rng.uniform(10.1, 60)
-            
-        qty_on_hand = int(amd/30.0 * cov_days)
+        if risk_roll < 0.07:   # RED: very low coverage, urgent
+            cov_days = rng.uniform(0.1, 2)
+        elif risk_roll < 0.20: # YELLOW: moderate coverage
+            cov_days = rng.uniform(2.5, 10)
+        else:  # GREEN: typical items
+            green_roll = rng.random()
+            if green_roll < 0.4:
+                cov_days = rng.uniform(10.5, 20)
+            elif green_roll < 0.8:
+                cov_days = rng.uniform(20, 40)
+            elif green_roll < 0.95:
+                cov_days = rng.uniform(40, 100)
+            else:
+                cov_days = rng.uniform(100, 200) # rare, extreme overstock, less frequent
+
+        # Add some variance to reflect day-by-day stock fluctuation in real warehouses
+        # Add/subtract random days (up to +-10%) to simulate recent receipts/issues
+        fluct = rng.uniform(-0.1, 0.1) * cov_days
+        cov_days = max(0, cov_days + fluct)
+
+        qty_on_hand = int(np.round(amd / 30.0 * cov_days + rng.normal(0, amd * 0.12)))
+        qty_on_hand = max(qty_on_hand, 0)
         inv_rows.append({
             "company_id": company_id,
             "snapshot_date": snapshot_date,
