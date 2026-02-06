@@ -662,11 +662,13 @@ def render_inventory_card(row_inv):
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     
+    # --- LOGO ---
+    st.image("IRAC_logo.jpg", width=350)
+    
     # --- HEADER ---
     c1, c2 = st.columns([8, 3])
     with c1:
         st.markdown(f"""<div style="display:flex; align-items:center; gap:12px;">
-                <div style="font-size:44px; line-height:1;">📦</div>
                 <div><h1 style="margin:0; font-size:30px; color:#0F2933;">{APP_TITLE}</h1></div>
             </div>""", unsafe_allow_html=True)
     with c2:
@@ -676,9 +678,6 @@ def main():
             </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-
-    # --- SIDEBAR: Logo ---
-    st.sidebar.image("IRAC_logo.jpg", use_container_width=False, width=250)
 
     # --- SIDEBAR: Logic Explainer ---
     with st.sidebar.expander("🧮 Method 5 Formula Logic", expanded=False):
