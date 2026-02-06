@@ -677,6 +677,9 @@ def main():
 
     st.markdown("---")
 
+    # --- SIDEBAR: Logo ---
+    st.sidebar.image("IRAC_logo.jpg", use_container_width=False, width=350)
+
     # --- SIDEBAR: Logic Explainer ---
     with st.sidebar.expander("🧮 Method 5 Formula Logic", expanded=False):
         st.latex(r"SS = Z \times \sigma_d \times \sqrt{LT}")
