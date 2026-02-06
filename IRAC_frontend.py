@@ -155,37 +155,64 @@ def classify_risk(df_inventory, df_stats, config):
 # --------------- DEMO DATA GENERATION --------------- #
 
 def generate_demo_data(company_id, config=None, seed=None):
-    if config is None: config = DEFAULT_COMPANY_CONFIG
+    """
+    Generate comprehensive demo data for IRAC analysis.
+    
+    This function creates realistic inventory scenarios with:
+    - 500-1000 materials to provide rich dataset for analysis
+    - 8-15 locations to simulate complex distribution networks
+    - Diverse risk scenarios including overstock situations
+    
+    Args:
+        company_id: Identifier for the company
+        config: Configuration dictionary (uses DEFAULT_COMPANY_CONFIG if None)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary containing generated datasets: materials, locations, demand,
+        forecast, inventory, open_supply
+    """
+    if config is None: 
+        config = DEFAULT_COMPANY_CONFIG
+    
     rng = np.random.default_rng(seed)
 
-    n_materials = rng.integers(50, 150)
-    n_locations = rng.integers(3, 8)
+    # Generate 500-1000 materials for comprehensive analysis
+    n_materials = rng.integers(500, 1001)
+    
+    # Generate 8-15 locations to simulate diverse distribution networks
+    n_locations = rng.integers(8, 16)
 
+    # Generate materials with ABC classification
+    # ABC distribution: 15% A-class (high value), 55% B-class, 30% C-class (low value)
     materials = []
     for i in range(n_materials):
-        mid = f"MAT_{i:03d}"
+        mid = f"MAT_{i:04d}"  # 4 digits to support up to 9999 materials
         abc = rng.choice(["A", "B", "C"], p=[0.15, 0.55, 0.3])
-        lt = rng.integers(5, 45)
+        lt = rng.integers(5, 45)  # Lead time: 5-45 days
+        
         materials.append({
             "company_id": company_id,
             "material_id": mid,
-            "material_desc": f"Part {mid} - {rng.choice(['Pro', 'Eco', 'Lite', 'Max'])}",
+            "material_desc": f"Part {mid} - {rng.choice(['Pro', 'Eco', 'Lite', 'Max', 'Plus', 'Elite', 'Prime', 'Standard'])}",
             "uom": "EA",
-            "material_group": f"GRP_{rng.integers(0, 5)}",
+            "material_group": f"GRP_{rng.integers(0, 10)}",  # 10 material groups for better categorization
             "abc_class": abc,
             "unit_price": round(rng.uniform(5, 800), 2),
             "lead_time_days": lt
         })
 
+    # Generate locations (distribution centers and plants)
+    # Diverse location types across multiple regions
     locations = []
     for j in range(n_locations):
         lid = f"LOC_{j:02d}"
         locations.append({
             "company_id": company_id,
             "location_id": lid,
-            "location_name": f"WH {lid} ({rng.choice(['Hub', 'Spoke'])})",
-            "location_type": rng.choice(["PLANT", "DC"]),
-            "region": f"REGION_{j % 3}",
+            "location_name": f"WH {lid} ({rng.choice(['Hub', 'Spoke', 'Regional', 'Central'])})",
+            "location_type": rng.choice(["PLANT", "DC", "RDC"]),  # Added RDC (Regional Distribution Center)
+            "region": f"REGION_{j % 5}",  # 5 regions for better geographic distribution
         })
 
     df_materials = pd.DataFrame(materials)
@@ -212,6 +239,12 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_demand = pd.DataFrame(demand_rows)
     df_forecast = pd.DataFrame(forecast_rows)
 
+    # Generate inventory snapshots with diverse coverage scenarios
+    # This creates realistic distribution including:
+    # - Critical shortages (RED: ~7%)
+    # - Warnings (YELLOW: ~13%) 
+    # - Healthy stock (GREEN: ~60%)
+    # - Overstock situations (WAY ABOVE MAX: ~20% - this is key for rebalancing)
     inv_rows = []
     snapshot_date = today
     avg_dem = df_demand.groupby(["material_id", "location_id"])["qty_demand"].mean().reset_index()
@@ -220,32 +253,45 @@ def generate_demo_data(company_id, config=None, seed=None):
         mid, lid = row["material_id"], row["location_id"]
         amd = row["qty_demand"]
 
-        # More realistic replenishment logic:
-        # - About 7% RED, 13% YELLOW, 80% GREEN (previous was ~15/35/50)
-        # - GREEN: 80% of items, 50% ~14-40 days (around order cycle), rest distributed with 10% up to 100 days, 20% higher (rare excess)
+        # Enhanced replenishment logic to create more overstock scenarios:
+        # - 7% RED (critical shortage)
+        # - 13% YELLOW (warning) 
+        # - 60% GREEN (healthy range: 10-60 days)
+        # - 20% EXTREME OVERSTOCK (100-300 days) - way above max for rebalancing opportunities
         risk_roll = rng.random()
-        if risk_roll < 0.07:   # RED: very low coverage, urgent
+        
+        if risk_roll < 0.07:
+            # RED: very low coverage, urgent replenishment needed
             cov_days = rng.uniform(0.1, 2)
-        elif risk_roll < 0.20: # YELLOW: moderate coverage
+        elif risk_roll < 0.20:
+            # YELLOW: moderate coverage, attention needed
             cov_days = rng.uniform(2.5, 10)
-        else:  # GREEN: typical items
+        elif risk_roll < 0.80:
+            # GREEN: healthy stock levels
             green_roll = rng.random()
             if green_roll < 0.4:
                 cov_days = rng.uniform(10.5, 20)
             elif green_roll < 0.8:
-                cov_days = rng.uniform(20, 40)
-            elif green_roll < 0.95:
-                cov_days = rng.uniform(40, 100)
+                cov_days = rng.uniform(20, 60)
             else:
-                cov_days = rng.uniform(100, 200) # rare, extreme overstock, less frequent
+                cov_days = rng.uniform(60, 100)
+        else:
+            # EXTREME OVERSTOCK: way above max, candidates for rebalancing
+            # These are the key items that could be transferred to shortage locations
+            overstock_roll = rng.random()
+            if overstock_roll < 0.5:
+                cov_days = rng.uniform(100, 180)  # High overstock
+            else:
+                cov_days = rng.uniform(180, 300)  # Extreme overstock
 
-        # Add some variance to reflect day-by-day stock fluctuation in real warehouses
-        # Add/subtract random days (up to +-10%) to simulate recent receipts/issues
+        # Add realistic variance to simulate day-by-day fluctuations
         fluct = rng.uniform(-0.1, 0.1) * cov_days
         cov_days = max(0, cov_days + fluct)
 
+        # Calculate quantity on hand based on coverage days
         qty_on_hand = int(np.round(amd / 30.0 * cov_days + rng.normal(0, amd * 0.12)))
         qty_on_hand = max(qty_on_hand, 0)
+        
         inv_rows.append({
             "company_id": company_id,
             "snapshot_date": snapshot_date,
@@ -256,18 +302,24 @@ def generate_demo_data(company_id, config=None, seed=None):
 
     df_inventory = pd.DataFrame(inv_rows)
     
+    # Generate open purchase orders (future receipts)
+    # Items with low stock are more likely to have POs
     po_rows = []
     po_cnt = 1
+    
     for _, inv in df_inventory.iterrows():
+        # Probability of having a PO depends on current stock level
         has_po = False
-        if inv["qty_on_hand"] < 50: has_po = rng.random() < 0.8
-        else: has_po = rng.random() < 0.3
+        if inv["qty_on_hand"] < 50:
+            has_po = rng.random() < 0.8  # 80% chance for low stock items
+        else:
+            has_po = rng.random() < 0.3  # 30% chance for other items
         
         if has_po:
-            n = rng.integers(1, 3)
+            n = rng.integers(1, 3)  # 1-2 PO lines per item
             for _ in range(n):
                 qty = rng.integers(50, 500)
-                days_due = rng.integers(-5, 60) 
+                days_due = rng.integers(-5, 60)  # Some POs may be overdue (negative days)
                 po_rows.append({
                     "company_id": company_id,
                     "order_id": f"PO_{po_cnt:05d}",
@@ -282,10 +334,184 @@ def generate_demo_data(company_id, config=None, seed=None):
     df_open_supply = pd.DataFrame(po_rows)
 
     return {
-        "materials": df_materials, "locations": df_locations, "demand": df_demand,
-        "forecast": df_forecast, "inventory": df_inventory, "leadtime": pd.DataFrame(),
+        "materials": df_materials, 
+        "locations": df_locations, 
+        "demand": df_demand,
+        "forecast": df_forecast, 
+        "inventory": df_inventory, 
+        "leadtime": pd.DataFrame(),
         "open_supply": df_open_supply
     }
+
+
+# --------------- REBALANCING ANALYSIS --------------- #
+
+def identify_rebalancing_opportunities(df_risk):
+    """
+    Identify materials that are overstocked in some locations but short in others.
+    
+    This function finds rebalancing opportunities where:
+    - Material has excess stock (>100 days) in at least one location (SOURCE)
+    - Same material has shortage (RED/YELLOW) in at least one other location (DESTINATION)
+    
+    Args:
+        df_risk: DataFrame with risk classification for all material-location combinations
+        
+    Returns:
+        DataFrame with rebalancing proposals including source/destination locations and quantities
+    """
+    if df_risk.empty:
+        return pd.DataFrame()
+    
+    # Group by material to find rebalancing candidates
+    rebalancing_proposals = []
+    
+    for material_id in df_risk["material_id"].unique():
+        mat_df = df_risk[df_risk["material_id"] == material_id].copy()
+        
+        # Find overstock locations (potential sources) - coverage > 100 days
+        overstock = mat_df[mat_df["coverage_days"] > 100].copy()
+        
+        # Find shortage locations (potential destinations) - RED or YELLOW status
+        shortage = mat_df[mat_df["risk_status"].isin(["RED", "YELLOW"])].copy()
+        
+        # If we have both overstock and shortage for this material, create proposals
+        if not overstock.empty and not shortage.empty:
+            for _, src in overstock.iterrows():
+                for _, dest in shortage.iterrows():
+                    # Calculate transferable quantity
+                    # From source: excess above max level
+                    excess_qty = max(0, src["qty_on_hand"] - src["max_qty"])
+                    
+                    # To destination: gap to reach max level (considering inbound)
+                    dest_gap = max(0, dest["max_qty"] - dest["qty_on_hand"] - dest.get("qty_inbound", 0))
+                    
+                    # Proposed transfer is the minimum of excess and gap
+                    transfer_qty = min(excess_qty, dest_gap)
+                    
+                    if transfer_qty > 0:
+                        # Calculate coverage improvement for destination
+                        dest_avg_demand = dest["avg_daily_demand"] if dest["avg_daily_demand"] > 0 else 1
+                        coverage_improvement = transfer_qty / dest_avg_demand
+                        
+                        # Calculate total value of transfer
+                        transfer_value = transfer_qty * src.get("unit_price", 0)
+                        
+                        rebalancing_proposals.append({
+                            "material_id": material_id,
+                            "material_desc": src.get("material_desc", material_id),
+                            "abc_class": src.get("abc_class", ""),
+                            "source_location": src["location_id"],
+                            "source_location_name": src.get("location_name", src["location_id"]),
+                            "source_coverage_days": src["coverage_days"],
+                            "source_qty_on_hand": src["qty_on_hand"],
+                            "dest_location": dest["location_id"],
+                            "dest_location_name": dest.get("location_name", dest["location_id"]),
+                            "dest_coverage_days": dest["coverage_days"],
+                            "dest_risk_status": dest["risk_status"],
+                            "dest_qty_on_hand": dest["qty_on_hand"],
+                            "transfer_qty": int(transfer_qty),
+                            "coverage_improvement_days": round(coverage_improvement, 1),
+                            "transfer_value": round(transfer_value, 2),
+                            "unit_price": src.get("unit_price", 0)
+                        })
+    
+    if not rebalancing_proposals:
+        return pd.DataFrame()
+    
+    df_rebalancing = pd.DataFrame(rebalancing_proposals)
+    # Sort by highest value transfers first
+    df_rebalancing = df_rebalancing.sort_values("transfer_value", ascending=False)
+    
+    return df_rebalancing
+
+
+def aggregate_material_metrics(df_risk, data):
+    """
+    Aggregate all metrics by material for comprehensive material view.
+    
+    Args:
+        df_risk: Risk-classified inventory data
+        data: Full dataset dictionary
+        
+    Returns:
+        DataFrame with material-level aggregations
+    """
+    if df_risk.empty:
+        return pd.DataFrame()
+    
+    # Aggregate metrics by material
+    material_agg = df_risk.groupby("material_id").agg({
+        "qty_on_hand": "sum",
+        "avg_daily_demand": "sum",
+        "total_value": "sum",
+        "coverage_days": "mean",
+        "abc_class": "first",
+        "material_desc": "first",
+        "unit_price": "first"
+    }).reset_index()
+    
+    # Count locations and risk distribution per material
+    risk_counts = df_risk.groupby(["material_id", "risk_status"]).size().unstack(fill_value=0).reset_index()
+    material_agg = material_agg.merge(risk_counts, on="material_id", how="left")
+    
+    # Fill missing risk columns
+    for col in ["RED", "YELLOW", "GREEN"]:
+        if col not in material_agg.columns:
+            material_agg[col] = 0
+    
+    material_agg["total_locations"] = material_agg["RED"] + material_agg["YELLOW"] + material_agg["GREEN"]
+    
+    # Calculate summary metrics
+    material_agg["avg_coverage_days"] = material_agg["coverage_days"].round(1)
+    material_agg["total_qty_on_hand"] = material_agg["qty_on_hand"].astype(int)
+    material_agg["total_value_formatted"] = material_agg["total_value"].round(0).astype(int)
+    
+    return material_agg
+
+
+def aggregate_location_metrics(df_risk, data):
+    """
+    Aggregate all metrics by location for comprehensive location view.
+    
+    Args:
+        df_risk: Risk-classified inventory data
+        data: Full dataset dictionary
+        
+    Returns:
+        DataFrame with location-level aggregations
+    """
+    if df_risk.empty:
+        return pd.DataFrame()
+    
+    # Aggregate metrics by location
+    location_agg = df_risk.groupby("location_id").agg({
+        "qty_on_hand": "sum",
+        "avg_daily_demand": "sum",
+        "total_value": "sum",
+        "coverage_days": "mean",
+        "location_name": "first",
+        "region": "first"
+    }).reset_index()
+    
+    # Count materials and risk distribution per location
+    risk_counts = df_risk.groupby(["location_id", "risk_status"]).size().unstack(fill_value=0).reset_index()
+    location_agg = location_agg.merge(risk_counts, on="location_id", how="left")
+    
+    # Fill missing risk columns
+    for col in ["RED", "YELLOW", "GREEN"]:
+        if col not in location_agg.columns:
+            location_agg[col] = 0
+    
+    location_agg["total_materials"] = location_agg["RED"] + location_agg["YELLOW"] + location_agg["GREEN"]
+    
+    # Calculate summary metrics
+    location_agg["avg_coverage_days"] = location_agg["coverage_days"].round(1)
+    location_agg["total_qty_on_hand"] = location_agg["qty_on_hand"].astype(int)
+    location_agg["total_value_formatted"] = location_agg["total_value"].round(0).astype(int)
+    
+    return location_agg
+
 
 # --------------- UI HELPERS --------------- #
 
