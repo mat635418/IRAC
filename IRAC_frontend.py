@@ -159,8 +159,9 @@ def generate_demo_data(company_id, config=None, seed=None):
     Generate comprehensive demo data for IRAC analysis.
     
     This function creates realistic inventory scenarios with:
-    - 500-1000 materials to provide rich dataset for analysis
-    - 8-15 locations to simulate complex distribution networks
+    - 500-1000 materials (inclusive) to provide rich dataset for analysis
+    - 8-15 locations (inclusive) to simulate complex distribution networks
+    - Three location types: PLANT (manufacturing), DC (distribution center), RDC (regional distribution center)
     - Diverse risk scenarios including overstock situations
     
     Args:
@@ -177,10 +178,12 @@ def generate_demo_data(company_id, config=None, seed=None):
     
     rng = np.random.default_rng(seed)
 
-    # Generate 500-1000 materials for comprehensive analysis
+    # Generate 500-1000 materials (inclusive) for comprehensive analysis
+    # Note: rng.integers(500, 1001) generates values from 500 to 1000 inclusive
     n_materials = rng.integers(500, 1001)
     
-    # Generate 8-15 locations to simulate diverse distribution networks
+    # Generate 8-15 locations (inclusive) to simulate diverse distribution networks
+    # Note: rng.integers(8, 16) generates values from 8 to 15 inclusive
     n_locations = rng.integers(8, 16)
 
     # Generate materials with ABC classification
@@ -384,6 +387,7 @@ def identify_rebalancing_opportunities(df_risk):
                     excess_qty = max(0, src["qty_on_hand"] - src["max_qty"])
                     
                     # To destination: gap to reach max level (considering inbound)
+                    # Note: qty_inbound should be available from earlier merge in main logic
                     dest_gap = max(0, dest["max_qty"] - dest["qty_on_hand"] - dest.get("qty_inbound", 0))
                     
                     # Proposed transfer is the minimum of excess and gap
@@ -391,7 +395,8 @@ def identify_rebalancing_opportunities(df_risk):
                     
                     if transfer_qty > 0:
                         # Calculate coverage improvement for destination
-                        dest_avg_demand = dest["avg_daily_demand"] if dest["avg_daily_demand"] > 0 else 1
+                        # Use small epsilon to avoid division by zero
+                        dest_avg_demand = dest["avg_daily_demand"] if dest["avg_daily_demand"] > 0.01 else 0.01
                         coverage_improvement = transfer_qty / dest_avg_demand
                         
                         # Calculate total value of transfer
