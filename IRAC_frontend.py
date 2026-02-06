@@ -1066,5 +1066,537 @@ def main():
     else:
         st.success("No urgent replenishment needed! All Red/Yellow items have sufficient inbound supply.")
 
+    # --- SECTION 5: REBALANCING OPPORTUNITIES ---
+    st.markdown("---")
+    st.header("5. 🔄 Rebalancing Opportunities")
+    st.markdown("""
+    **Smart Inventory Rebalancing**: This analysis identifies materials that are overstocked in some locations 
+    but critically short in others. By transferring excess inventory, you can reduce waste and improve service levels simultaneously.
+    """)
+    
+    # Identify rebalancing opportunities
+    df_rebalancing = identify_rebalancing_opportunities(df_risk)
+    
+    if not df_rebalancing.empty:
+        # Summary metrics
+        col_rb1, col_rb2, col_rb3, col_rb4 = st.columns(4)
+        
+        with col_rb1:
+            st.metric(
+                "Rebalancing Opportunities", 
+                len(df_rebalancing),
+                help="Number of potential transfers identified"
+            )
+        
+        with col_rb2:
+            total_transfer_value = df_rebalancing["transfer_value"].sum()
+            st.metric(
+                "Total Transfer Value", 
+                f"${total_transfer_value:,.0f}",
+                help="Total value of inventory that could be rebalanced"
+            )
+        
+        with col_rb3:
+            unique_materials = df_rebalancing["material_id"].nunique()
+            st.metric(
+                "Materials Affected", 
+                unique_materials,
+                help="Number of unique materials with rebalancing opportunities"
+            )
+        
+        with col_rb4:
+            avg_improvement = df_rebalancing["coverage_improvement_days"].mean()
+            st.metric(
+                "Avg Coverage Gain", 
+                f"{avg_improvement:.1f} days",
+                help="Average coverage improvement at destination locations"
+            )
+        
+        st.markdown("---")
+        
+        # Filters for rebalancing view
+        f_rb1, f_rb2 = st.columns(2)
+        
+        with f_rb1:
+            abc_filter = st.multiselect(
+                "Filter by ABC Class",
+                options=sorted(df_rebalancing["abc_class"].unique()),
+                help="Focus on specific material classes"
+            )
+        
+        with f_rb2:
+            risk_filter = st.multiselect(
+                "Filter by Destination Risk",
+                options=["RED", "YELLOW"],
+                default=["RED", "YELLOW"],
+                help="Show transfers to locations with specific risk status"
+            )
+        
+        # Apply filters
+        df_rebal_filtered = df_rebalancing.copy()
+        if abc_filter:
+            df_rebal_filtered = df_rebal_filtered[df_rebal_filtered["abc_class"].isin(abc_filter)]
+        if risk_filter:
+            df_rebal_filtered = df_rebal_filtered[df_rebal_filtered["dest_risk_status"].isin(risk_filter)]
+        
+        # Display rebalancing proposals
+        st.markdown("### 📊 Detailed Rebalancing Proposals")
+        
+        if not df_rebal_filtered.empty:
+            # Show top proposals
+            st.dataframe(
+                df_rebal_filtered[[
+                    "material_id", "material_desc", "abc_class",
+                    "source_location_name", "source_coverage_days",
+                    "dest_location_name", "dest_risk_status", "dest_coverage_days",
+                    "transfer_qty", "coverage_improvement_days", "transfer_value"
+                ]].head(100),
+                column_config={
+                    "material_id": st.column_config.TextColumn("Material ID", width="small"),
+                    "material_desc": st.column_config.TextColumn("Description", width="medium"),
+                    "abc_class": st.column_config.TextColumn("ABC", width="small"),
+                    "source_location_name": st.column_config.TextColumn("From Location", width="medium"),
+                    "source_coverage_days": st.column_config.NumberColumn("Source Days", format="%.1f"),
+                    "dest_location_name": st.column_config.TextColumn("To Location", width="medium"),
+                    "dest_risk_status": st.column_config.TextColumn("Dest Risk", width="small"),
+                    "dest_coverage_days": st.column_config.NumberColumn("Dest Days", format="%.1f"),
+                    "transfer_qty": st.column_config.NumberColumn("Transfer Qty", format="%d"),
+                    "coverage_improvement_days": st.column_config.NumberColumn("Days Gained", format="%.1f"),
+                    "transfer_value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=400
+            )
+            
+            # Visualization: Top materials by transfer value
+            st.markdown("### 📈 Top Rebalancing Opportunities by Value")
+            
+            col_vis1, col_vis2 = st.columns(2)
+            
+            with col_vis1:
+                # Bar chart of top materials
+                top_materials = df_rebal_filtered.groupby("material_id").agg({
+                    "transfer_value": "sum",
+                    "transfer_qty": "sum"
+                }).reset_index().sort_values("transfer_value", ascending=False).head(15)
+                
+                chart_mat = alt.Chart(top_materials).mark_bar().encode(
+                    x=alt.X('material_id', sort='-y', title='Material'),
+                    y=alt.Y('transfer_value', title='Total Transfer Value ($)'),
+                    color=alt.value('#0B67A4'),
+                    tooltip=['material_id', 'transfer_value', 'transfer_qty']
+                ).properties(
+                    title="Top 15 Materials by Transfer Value",
+                    height=300
+                )
+                st.altair_chart(chart_mat, use_container_width=True)
+            
+            with col_vis2:
+                # Distribution by ABC class
+                abc_summary = df_rebal_filtered.groupby("abc_class").agg({
+                    "transfer_value": "sum"
+                }).reset_index()
+                
+                chart_abc = alt.Chart(abc_summary).mark_arc(innerRadius=50).encode(
+                    theta=alt.Theta('transfer_value', title='Total Value'),
+                    color=alt.Color('abc_class', 
+                                    scale=alt.Scale(domain=['A', 'B', 'C'], 
+                                                   range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                    tooltip=['abc_class', 'transfer_value']
+                ).properties(
+                    title="Transfer Value by ABC Class",
+                    height=300
+                )
+                st.altair_chart(chart_abc, use_container_width=True)
+        else:
+            st.info("No rebalancing opportunities match the selected filters.")
+    else:
+        st.success("✅ No rebalancing opportunities found. Inventory distribution is optimal across locations!")
+
+    # --- SECTION 6: BY MATERIAL VIEW ---
+    st.markdown("---")
+    st.header("6. 📦 By Material Analysis")
+    st.markdown("""
+    **Material-Centric View**: Comprehensive analysis of each material across all locations.
+    Understand total inventory position, risk distribution, and location-specific dynamics.
+    """)
+    
+    # Generate material-level aggregations
+    df_material_agg = aggregate_material_metrics(df_risk, data)
+    
+    if not df_material_agg.empty:
+        # Material selection
+        selected_material = st.selectbox(
+            "Select Material for Detailed Analysis",
+            options=sorted(df_material_agg["material_id"].unique()),
+            help="Choose a material to see comprehensive metrics"
+        )
+        
+        # Filter for selected material
+        mat_data = df_material_agg[df_material_agg["material_id"] == selected_material].iloc[0]
+        mat_locations = df_risk[df_risk["material_id"] == selected_material].copy()
+        
+        # Display material header
+        st.markdown(f"### 🔍 Material: **{selected_material}** - {mat_data['material_desc']}")
+        
+        # Key metrics for this material
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        
+        with col_m1:
+            st.metric("ABC Class", mat_data["abc_class"])
+        
+        with col_m2:
+            st.metric("Total Locations", int(mat_data["total_locations"]))
+        
+        with col_m3:
+            st.metric("Total On Hand", f"{int(mat_data['total_qty_on_hand']):,}")
+        
+        with col_m4:
+            st.metric("Avg Coverage", f"{mat_data['avg_coverage_days']:.1f} days")
+        
+        with col_m5:
+            st.metric("Total Value", f"${int(mat_data['total_value_formatted']):,}")
+        
+        st.markdown("---")
+        
+        # Create tabs for different analyses
+        tab_mat1, tab_mat2, tab_mat3 = st.tabs([
+            "📊 Location Distribution", 
+            "📈 Coverage Analysis", 
+            "⚠️ Risk Summary"
+        ])
+        
+        with tab_mat1:
+            st.markdown("#### Inventory Distribution Across Locations")
+            
+            # Table view
+            st.dataframe(
+                mat_locations[[
+                    "location_id", "location_name", "region", "risk_status",
+                    "qty_on_hand", "coverage_days", "avg_daily_demand"
+                ]].sort_values("qty_on_hand", ascending=False),
+                column_config={
+                    "location_id": "Location ID",
+                    "location_name": "Location",
+                    "region": "Region",
+                    "risk_status": st.column_config.TextColumn("Risk"),
+                    "qty_on_hand": st.column_config.NumberColumn("On Hand", format="%d"),
+                    "coverage_days": st.column_config.NumberColumn("Coverage (Days)", format="%.1f"),
+                    "avg_daily_demand": st.column_config.NumberColumn("Avg Daily Demand", format="%.1f")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Bar chart of quantities by location
+            st.markdown("##### Quantity Distribution")
+            chart_loc_qty = alt.Chart(mat_locations).mark_bar().encode(
+                x=alt.X('location_id', sort='-y', title='Location'),
+                y=alt.Y('qty_on_hand', title='Quantity On Hand'),
+                color=alt.Color('risk_status', 
+                               scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'], 
+                                             range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                tooltip=['location_id', 'qty_on_hand', 'coverage_days', 'risk_status']
+            ).properties(height=300)
+            st.altair_chart(chart_loc_qty, use_container_width=True)
+        
+        with tab_mat2:
+            st.markdown("#### Coverage Days Analysis")
+            
+            # Coverage distribution chart
+            col_cov1, col_cov2 = st.columns(2)
+            
+            with col_cov1:
+                # Scatter plot of coverage vs demand
+                mat_loc_chart = mat_locations.copy()
+                mat_loc_chart["vis_coverage"] = mat_loc_chart["coverage_days"].clip(upper=150)
+                
+                scatter_mat = alt.Chart(mat_loc_chart).mark_circle(size=150).encode(
+                    x=alt.X('avg_daily_demand', title='Avg Daily Demand'),
+                    y=alt.Y('vis_coverage', title='Coverage Days (capped at 150)'),
+                    color=alt.Color('risk_status',
+                                   scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'],
+                                                 range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                    tooltip=['location_id', 'coverage_days', 'avg_daily_demand', 'risk_status']
+                ).properties(
+                    title="Coverage vs Demand by Location",
+                    height=300
+                )
+                st.altair_chart(scatter_mat, use_container_width=True)
+            
+            with col_cov2:
+                # Coverage distribution histogram
+                hist_coverage = alt.Chart(mat_locations).mark_bar().encode(
+                    x=alt.X('coverage_days', bin=alt.Bin(maxbins=20), title='Coverage Days'),
+                    y=alt.Y('count()', title='Number of Locations'),
+                    color=alt.value('#0B67A4'),
+                    tooltip=['count()']
+                ).properties(
+                    title="Coverage Distribution",
+                    height=300
+                )
+                st.altair_chart(hist_coverage, use_container_width=True)
+        
+        with tab_mat3:
+            st.markdown("#### Risk Status Summary")
+            
+            # Risk distribution metrics
+            risk_counts = mat_locations["risk_status"].value_counts()
+            
+            col_risk1, col_risk2, col_risk3 = st.columns(3)
+            
+            with col_risk1:
+                red_count = risk_counts.get("RED", 0)
+                st.metric(
+                    "🔴 Critical Locations", 
+                    red_count,
+                    help="Locations with critical shortage"
+                )
+            
+            with col_risk2:
+                yellow_count = risk_counts.get("YELLOW", 0)
+                st.metric(
+                    "🟡 Warning Locations", 
+                    yellow_count,
+                    help="Locations needing attention"
+                )
+            
+            with col_risk3:
+                green_count = risk_counts.get("GREEN", 0)
+                st.metric(
+                    "🟢 Healthy Locations", 
+                    green_count,
+                    help="Locations with adequate stock"
+                )
+            
+            # Pie chart of risk distribution
+            risk_df = pd.DataFrame({
+                'risk_status': list(risk_counts.index),
+                'count': list(risk_counts.values)
+            })
+            
+            pie_risk = alt.Chart(risk_df).mark_arc(outerRadius=120).encode(
+                theta=alt.Theta('count', stack=True),
+                color=alt.Color('risk_status',
+                               scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'],
+                                             range=['#D93025', '#F9AB00', '#1E8E3E']),
+                               legend=alt.Legend(title="Risk Status")),
+                tooltip=['risk_status', 'count']
+            ).properties(
+                title="Risk Distribution Across Locations",
+                height=300
+            )
+            st.altair_chart(pie_risk, use_container_width=True)
+    else:
+        st.warning("No material data available for analysis.")
+
+    # --- SECTION 7: BY LOCATION VIEW ---
+    st.markdown("---")
+    st.header("7. 🏭 By Location Analysis")
+    st.markdown("""
+    **Location-Centric View**: Deep dive into warehouse or plant performance.
+    Monitor inventory health, identify bottlenecks, and optimize location-specific operations.
+    """)
+    
+    # Generate location-level aggregations
+    df_location_agg = aggregate_location_metrics(df_risk, data)
+    
+    if not df_location_agg.empty:
+        # Location selection
+        selected_location = st.selectbox(
+            "Select Location for Detailed Analysis",
+            options=sorted(df_location_agg["location_id"].unique()),
+            help="Choose a location to see comprehensive metrics"
+        )
+        
+        # Filter for selected location
+        loc_data = df_location_agg[df_location_agg["location_id"] == selected_location].iloc[0]
+        loc_materials = df_risk[df_risk["location_id"] == selected_location].copy()
+        
+        # Display location header
+        st.markdown(f"### 🔍 Location: **{selected_location}** - {loc_data['location_name']}")
+        
+        # Key metrics for this location
+        col_l1, col_l2, col_l3, col_l4, col_l5 = st.columns(5)
+        
+        with col_l1:
+            st.metric("Region", loc_data["region"])
+        
+        with col_l2:
+            st.metric("Total Materials", int(loc_data["total_materials"]))
+        
+        with col_l3:
+            st.metric("Total On Hand", f"{int(loc_data['total_qty_on_hand']):,}")
+        
+        with col_l4:
+            st.metric("Avg Coverage", f"{loc_data['avg_coverage_days']:.1f} days")
+        
+        with col_l5:
+            st.metric("Total Value", f"${int(loc_data['total_value_formatted']):,}")
+        
+        st.markdown("---")
+        
+        # Create tabs for different analyses
+        tab_loc1, tab_loc2, tab_loc3 = st.tabs([
+            "📊 Material Distribution", 
+            "📈 ABC Analysis", 
+            "⚠️ Risk Summary"
+        ])
+        
+        with tab_loc1:
+            st.markdown("#### Inventory Distribution by Material")
+            
+            # Table view - top materials
+            st.markdown("##### Top Materials by Value")
+            st.dataframe(
+                loc_materials[[
+                    "material_id", "material_desc", "abc_class", "risk_status",
+                    "qty_on_hand", "coverage_days", "total_value"
+                ]].sort_values("total_value", ascending=False).head(50),
+                column_config={
+                    "material_id": "Material ID",
+                    "material_desc": "Description",
+                    "abc_class": "ABC",
+                    "risk_status": st.column_config.TextColumn("Risk"),
+                    "qty_on_hand": st.column_config.NumberColumn("On Hand", format="%d"),
+                    "coverage_days": st.column_config.NumberColumn("Coverage (Days)", format="%.1f"),
+                    "total_value": st.column_config.NumberColumn("Value", format="$%.0f")
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=400
+            )
+            
+            # Total value by risk status
+            st.markdown("##### Inventory Value by Risk Status")
+            value_by_risk = loc_materials.groupby("risk_status")["total_value"].sum().reset_index()
+            
+            chart_value_risk = alt.Chart(value_by_risk).mark_bar().encode(
+                x=alt.X('risk_status', title='Risk Status', sort=['RED', 'YELLOW', 'GREEN']),
+                y=alt.Y('total_value', title='Total Value ($)'),
+                color=alt.Color('risk_status',
+                               scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'],
+                                             range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                tooltip=['risk_status', 'total_value']
+            ).properties(height=300)
+            st.altair_chart(chart_value_risk, use_container_width=True)
+        
+        with tab_loc2:
+            st.markdown("#### ABC Classification Analysis")
+            
+            col_abc1, col_abc2 = st.columns(2)
+            
+            with col_abc1:
+                # ABC distribution
+                abc_summary = loc_materials.groupby("abc_class").agg({
+                    "material_id": "count",
+                    "total_value": "sum"
+                }).reset_index()
+                abc_summary.columns = ["abc_class", "count", "total_value"]
+                
+                st.dataframe(
+                    abc_summary,
+                    column_config={
+                        "abc_class": "ABC Class",
+                        "count": st.column_config.NumberColumn("Material Count", format="%d"),
+                        "total_value": st.column_config.NumberColumn("Total Value", format="$%.0f")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Pie chart for ABC value distribution
+                pie_abc = alt.Chart(abc_summary).mark_arc(innerRadius=50).encode(
+                    theta=alt.Theta('total_value', title='Value'),
+                    color=alt.Color('abc_class',
+                                   scale=alt.Scale(domain=['A', 'B', 'C'],
+                                                 range=['#D93025', '#F9AB00', '#1E8E3E'])),
+                    tooltip=['abc_class', 'total_value', 'count']
+                ).properties(
+                    title="Value Distribution by ABC",
+                    height=250
+                )
+                st.altair_chart(pie_abc, use_container_width=True)
+            
+            with col_abc2:
+                # Risk distribution within each ABC class
+                abc_risk = loc_materials.groupby(["abc_class", "risk_status"]).size().reset_index(name='count')
+                
+                chart_abc_risk = alt.Chart(abc_risk).mark_bar().encode(
+                    x=alt.X('abc_class', title='ABC Class'),
+                    y=alt.Y('count', title='Number of Materials'),
+                    color=alt.Color('risk_status',
+                                   scale=alt.Scale(domain=['RED', 'YELLOW', 'GREEN'],
+                                                 range=['#D93025', '#F9AB00', '#1E8E3E']),
+                                   legend=alt.Legend(title="Risk Status")),
+                    tooltip=['abc_class', 'risk_status', 'count']
+                ).properties(
+                    title="Risk Distribution by ABC Class",
+                    height=300
+                )
+                st.altair_chart(chart_abc_risk, use_container_width=True)
+        
+        with tab_loc3:
+            st.markdown("#### Risk Status Summary")
+            
+            # Risk distribution metrics
+            risk_counts_loc = loc_materials["risk_status"].value_counts()
+            
+            col_risk_l1, col_risk_l2, col_risk_l3 = st.columns(3)
+            
+            with col_risk_l1:
+                red_count_loc = risk_counts_loc.get("RED", 0)
+                st.metric(
+                    "🔴 Critical Materials", 
+                    red_count_loc,
+                    help="Materials with critical shortage"
+                )
+            
+            with col_risk_l2:
+                yellow_count_loc = risk_counts_loc.get("YELLOW", 0)
+                st.metric(
+                    "🟡 Warning Materials", 
+                    yellow_count_loc,
+                    help="Materials needing attention"
+                )
+            
+            with col_risk_l3:
+                green_count_loc = risk_counts_loc.get("GREEN", 0)
+                st.metric(
+                    "🟢 Healthy Materials", 
+                    green_count_loc,
+                    help="Materials with adequate stock"
+                )
+            
+            # Show critical items that need attention
+            st.markdown("##### 🚨 Priority Items (RED Status)")
+            critical_items = loc_materials[loc_materials["risk_status"] == "RED"].sort_values(
+                "total_value", ascending=False
+            )
+            
+            if not critical_items.empty:
+                st.dataframe(
+                    critical_items[[
+                        "material_id", "material_desc", "abc_class",
+                        "qty_on_hand", "coverage_days", "avg_daily_demand", "total_value"
+                    ]].head(20),
+                    column_config={
+                        "material_id": "Material ID",
+                        "material_desc": "Description",
+                        "abc_class": "ABC",
+                        "qty_on_hand": st.column_config.NumberColumn("On Hand", format="%d"),
+                        "coverage_days": st.column_config.NumberColumn("Coverage", format="%.1f"),
+                        "avg_daily_demand": st.column_config.NumberColumn("Daily Demand", format="%.1f"),
+                        "total_value": st.column_config.NumberColumn("Value", format="$%.0f")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.success("✅ No critical items at this location!")
+    else:
+        st.warning("No location data available for analysis.")
+
 if __name__ == "__main__":
     main()
